@@ -1,0 +1,9 @@
+Lichess_Elite_Database/*/
+env1/*/
+stockfish/*/
+Stockfish_data/*/
+Stockfish_test_data/*/
+syzygy/*/
+__pycache__/*/
+Models/*/
+stockfish_label_cache.db
