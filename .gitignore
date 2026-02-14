@@ -2,6 +2,7 @@ Lichess_Elite_Database/
 env1/
 stockfish/
 Stockfish_data/
+Stockfish_data_val/
 Stockfish_test_data/
 syzygy/
 __pycache__/
@@ -12,3 +13,5 @@ Models/
 *.pth
 *.pt
 *.db
+*.txt
+*.csv
