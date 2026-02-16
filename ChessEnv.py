@@ -59,16 +59,22 @@ class ChessEnv(gym.Env):
         return ChessEnv.encode_board(self.board)
 
     @staticmethod
-    def decode_action(encoding, board: chess.Board):
-        move = ChessEnv.encoding_to_move[encoding]
+    def decode_action(encoding: int, board: chess.Board):
+        base = ChessEnv.encoding_to_move[encoding]
+        move = chess.Move(base.from_square, base.to_square, promotion=base.promotion)
+
         if board.turn == chess.BLACK:
             move = ChessEnv.mirror_move(move)
+
         if move not in board.legal_moves:
-            move.promotion = chess.QUEEN
+            # fallback promotion behavior
+            move = chess.Move(move.from_square, move.to_square, promotion=chess.QUEEN)
+
         return move
 
     @staticmethod
-    def encode_action(move: chess.Move, board: chess.Board):
+    def encode_action(base: chess.Move, board: chess.Board):
+        move = chess.Move(base.from_square, base.to_square, promotion=base.promotion)
         if board.turn == chess.BLACK:
             move = ChessEnv.mirror_move(move)
         if move.promotion == chess.QUEEN:
@@ -111,11 +117,18 @@ class ChessEnv(gym.Env):
 
         return my_tensor
 
-    [staticmethod]
-    def mirror_move(move):
-        from_sq = chess.square_mirror(move.from_square)
-        to_sq = chess.square_mirror(move.to_square)
-        return chess.Move(from_sq, to_sq, promotion=move.promotion)
+    @staticmethod
+    def mirror_move(move: chess.Move):
+        cur_from_row, cur_from_col = divmod(move.from_square, 8)
+        cur_to_row, cur_to_col = divmod(move.to_square, 8)
+        new_from_row = -cur_from_row + 7
+        new_from_col = -cur_from_col + 7
+        new_to_row =  -cur_to_row + 7
+        new_to_col = -cur_to_col + 7
+        new_from_square = new_from_row * 8 + new_from_col
+        new_to_square = new_to_row * 8 + new_to_col
+        new_move = chess.Move(new_from_square, new_to_square, promotion=move.promotion)
+        return new_move
 
     def peek_at_next_state(self, action):
         new_board = self.board.copy(stack=False)

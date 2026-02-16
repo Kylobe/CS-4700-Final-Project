@@ -525,7 +525,7 @@ def main():
 
     # ---- Streaming train loader (ALL 47GB) ----
     stream_ds, train_loader = make_stream_loader(
-        root_dir="Stockfish_data",
+        root_dir="Stockfish_data_val",
         batch_size=config["batch_size"],
         num_workers=8,          # tune: 4/8/12 depending on CPU
         shuffle_buffer=50_000,  # tune down if RAM spikes

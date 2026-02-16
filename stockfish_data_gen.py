@@ -219,54 +219,76 @@ ENGINE_PATH = r"C:\Users\Traedon Harris\Documents\GitHub\CS-4700-Final-Project\s
 def open_and_init_db(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(
         db_path,
-        timeout=30.0,              # wait if DB is busy
-        isolation_level=None,      # autocommit
-        check_same_thread=False    # required for multiprocessing
+        timeout=30.0,
+        isolation_level=None,
+        check_same_thread=False
     )
 
-    # Concurrency + performance
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA temp_store=MEMORY;")
 
-    # Create table (safe to call every time)
     conn.execute("""
     CREATE TABLE IF NOT EXISTS labels (
-        k INTEGER PRIMARY KEY,     -- board.transposition_key()
-        value REAL NOT NULL,       -- value label
-        moves TEXT NOT NULL,       -- JSON list of UCI moves
-        policy_idx BLOB NOT NULL,  -- int32[]
-        policy_prob BLOB NOT NULL  -- float32[]
+        k INTEGER PRIMARY KEY,
+        value REAL NOT NULL,
+        moves TEXT NOT NULL,
+        policy_idx BLOB NOT NULL,
+        policy_prob BLOB NOT NULL,
+        visits INTEGER NOT NULL DEFAULT 0
     );
     """)
 
+    # Migration for existing DB files
+    try:
+        conn.execute("ALTER TABLE labels ADD COLUMN visits INTEGER NOT NULL DEFAULT 0;")
+    except sqlite3.OperationalError:
+        # column already exists
+        pass
+
     return conn
+
+def cache_peek_visits(conn: sqlite3.Connection, key: int) -> int:
+    row = conn.execute("SELECT visits FROM labels WHERE k=?", (key,)).fetchone()
+    return int(row[0]) if row is not None else 0
+
+def cache_increment_visits(conn: sqlite3.Connection, key: int) -> None:
+    conn.execute("UPDATE labels SET visits = visits + 1 WHERE k=?", (key,))
+
 
 def cache_get(conn: sqlite3.Connection, key: int):
     row = conn.execute(
-        "SELECT value, moves, policy_idx, policy_prob FROM labels WHERE k=?",
+        "SELECT value, moves, policy_idx, policy_prob, visits FROM labels WHERE k=?",
         (key,)
     ).fetchone()
     if row is None:
         return None
-    value, moves_json, idx_blob, prob_blob = row
+
+    value, moves_json, idx_blob, prob_blob, visits = row
+
+    # TOUCH: increment visits because we visited this state
+    conn.execute("UPDATE labels SET visits = visits + 1 WHERE k=?", (key,))
+
     moves = json.loads(moves_json)
-    idx_blob = np.frombuffer(idx_blob, dtype=np.int32).copy()
-    prob_blob = np.frombuffer(prob_blob, dtype=np.float32).copy()
-    idx, prob = unpack_sparse_policy(idx_blob, prob_blob)
+    idx = np.frombuffer(idx_blob, dtype=np.int32).copy()
+    prob = np.frombuffer(prob_blob, dtype=np.float32).copy()
+    idx, prob = unpack_sparse_policy(idx, prob)
 
-    return float(value), moves, idx, prob
+    return float(value), moves, idx, prob, int(visits) + 1
 
-def cache_put(conn: sqlite3.Connection, key: int, value: float, moves: List[str],
+def cache_put(conn: sqlite3.Connection, key: int, value: float, moves: list[str],
               policy_idx: np.ndarray, policy_prob: np.ndarray) -> None:
     idx_blob, prob_blob = pack_sparse_policy(policy_idx, policy_prob)
     moves_json = json.dumps(moves)
 
-    # INSERT OR IGNORE prevents races: if another worker wrote first, this is a no-op.
     conn.execute(
-        "INSERT OR IGNORE INTO labels (k, value, moves, policy_idx, policy_prob) VALUES (?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO labels (k, value, moves, policy_idx, policy_prob, visits) "
+        "VALUES (?, ?, ?, ?, ?, 0)",
         (key, float(value), moves_json, idx_blob, prob_blob)
     )
+
+    # TOUCH: count this as a visit
+    conn.execute("UPDATE labels SET visits = visits + 1 WHERE k=?", (key,))
 
 def pack_sparse_policy(action_indices: np.ndarray, action_probs: np.ndarray) -> Tuple[bytes, bytes]:
     # indices int32, probs float32
@@ -284,6 +306,38 @@ def sqlite_int64_from_uint64(x: int) -> int:
         x -= (1 << 64)
     return x
 
+def policy_prob_for_move(policy_label: torch.Tensor, board: chess.Board, move: chess.Move) -> float:
+    plane, row, col = ChessEnv.encode_action(move, board)
+    return float(policy_label[plane, row, col].item())
+
+def select_move_least_visited_then_best(
+    conn: sqlite3.Connection,
+    board: chess.Board,
+    candidate_moves: list[chess.Move],
+    policy_label: torch.Tensor,
+) -> chess.Move:
+    best_move = None
+
+    best_visits = None
+    best_score = None  # higher is better for tie-break
+
+    for mv in candidate_moves:
+        tmp = board.copy(stack=False)
+        tmp.push(mv)
+        child_key = sqlite_int64_from_uint64(chess.polyglot.zobrist_hash(tmp))
+
+        v = cache_peek_visits(conn, child_key)  # NO touch
+        s = policy_prob_for_move(policy_label, board, mv)  # Stockfish-derived probability
+
+        if (best_move is None
+            or v < best_visits
+            or (v == best_visits and s > best_score)):
+            best_move = mv
+            best_visits = v
+            best_score = s
+
+    return best_move
+
 def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: str, engine_path: str, db_path: str):
     os.makedirs(out_dir, exist_ok=True)
 
@@ -295,12 +349,13 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
     memory = []
     files_saved = 0
     local_index = 0
-
-    labeled_board_states = {}
+    game_counter = 0
 
     try:
         while files_saved < n_files:
             board = env.reset()
+            game_counter += 1
+            print(f"[Worker {worker_id}] Starting Game: {game_counter}")
             while not board.is_game_over():
                 legal_moves = list(board.legal_moves)
                 if not legal_moves:
@@ -309,7 +364,7 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
                 key = sqlite_int64_from_uint64(chess.polyglot.zobrist_hash(board))
                 hit = cache_get(conn, key)
                 if hit is not None:
-                    value_label, ranked_moves_uci, pol_idx, pol_prob = hit
+                    value_label, ranked_moves_uci, pol_idx, pol_prob, _ = hit
 
                     state_tensor = ChessEnv.encode_board(board)
                     action_mask = torch.tensor(ChessEnv.create_plane_action_mask(board), dtype=torch.float32)
@@ -326,7 +381,7 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
                     label, info_list = label_board(engine, board)
                     state_tensor, policy_label, value_label, action_mask = label
 
-                    ranked_moves = set([info["pv"][0] for info in info_list if info.get("pv")])
+                    ranked_moves = list([info["pv"][0] for info in info_list if info.get("pv")])
                     ranked_moves_uci = [m.uci() for m in ranked_moves]
 
                     # compress policy to top-K (recommended)
@@ -340,33 +395,16 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
 
                     cache_put(conn, key, float(value_label), ranked_moves_uci, top_idx, top_prob)
 
-                action = next(iter(ranked_moves))
-                found_move = False
-                for move in ranked_moves:
-                    tmp_board = board.copy(stack=False)
-                    tmp_board.push(move)
-                    key = sqlite_int64_from_uint64(chess.polyglot.zobrist_hash(tmp_board))
-                    hit = cache_get(conn, key)
-                    if hit is None:
-                        action = move
-                        found_move = True
-                        break
-
-                if not found_move:
-                    for move in board.legal_moves:
-                        if not move in ranked_moves:
-                            tmp_board = board.copy(stack=False)
-                            tmp_board.push(move)
-                            key = sqlite_int64_from_uint64(chess.polyglot.zobrist_hash(tmp_board))
-                            hit = cache_get(conn, key)
-                            if hit is None:
-                                action = move
-                                break
+                ranked_moves_list = list(ranked_moves) if ranked_moves else []
+                candidates = ranked_moves_list + list(board.legal_moves)
+                action = select_move_least_visited_then_best(conn, board, candidates, policy_label)
 
                 memory.append(label)
-
+                if local_index % 10 == 0:
+                    print(f"[Worker {worker_id}] played: {action.uci()}, for the posistion: {board.fen()}")
                 board.push(action)
                 local_index += 1
+                
 
             if len(memory) % 100 == 0:
                 print(f"[Worker {worker_id}] {(len(memory) * 100) / length_of_file:.1f}% done")
@@ -386,8 +424,9 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
             print(f"[Worker {worker_id}] Saved leftover {out_path} ({len(memory)} samples)")
         engine.quit()
 
-def parallel_data_gen(num_workers: int, files_per_worker: int, length_of_file: int, out_dir: str, engine_path: str, db_path: str):
-    # On Windows: must protect the entry point
+def parallel_data_gen(num_workers: int, files_per_worker: int, length_of_file: int,
+                      out_dir: str, engine_path: str, db_path: str,
+                      stagger_seconds: float = 0.5):
     ctx = mp.get_context("spawn")
     procs = []
 
@@ -400,6 +439,10 @@ def parallel_data_gen(num_workers: int, files_per_worker: int, length_of_file: i
         p.start()
         procs.append(p)
 
+        # Stagger starts
+        if stagger_seconds > 0 and wid < num_workers - 1:
+            time.sleep(stagger_seconds)
+
     for p in procs:
         p.join()
 
@@ -407,11 +450,12 @@ def main():
     mp.freeze_support()  # safe on Windows
     parallel_data_gen(
         num_workers=10,          # start with #physical cores or slightly less
-        files_per_worker=5,     # each worker writes this many files
+        files_per_worker=100,     # each worker writes this many files
         length_of_file=1000,    # samples per file (your length_of_file)
         out_dir="Stockfish_data_val",
         engine_path=ENGINE_PATH,
-        db_path="stockfish_label_cache.db"
+        db_path="stockfish_label_cache.db",
+        stagger_seconds=2.0
     )
 
 if __name__ == "__main__":
