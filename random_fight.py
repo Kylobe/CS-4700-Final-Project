@@ -8,16 +8,12 @@ import chess
 
 args = {
     'C': 2,
-    'num_searches': 60,
-    'num_iterations': 3,
-    'num_self_play_iterations': 10,
-    'epochs': 4,
-    'num_processes': 6,
-    'res_blocks': 12,
-    'num_hidden': 128,
-    'batch_size': 64
+    'num_searches': 200,
+    'lr': 1e-4,
+    'weight_decay': 1e-4,
+    'res_blocks': 40,
+    'num_hidden': 256,
 }
-
 
 env = ChessEnv()
 state = env.reset()
@@ -26,7 +22,7 @@ done = False
 # Your trained model
 model = AlphaZeroChess(env=env, num_resBlocks=args['res_blocks'], num_hidden=args['num_hidden'])
 
-model.load_state_dict(torch.load("AlphaChess2.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
+#model.load_state_dict(torch.load("PretrainModel.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
 model.eval()
 mcts = MCTS(env=env, args=args, model=model)
 
@@ -36,16 +32,20 @@ def model_vs_random():
     done = False
     model_is_white = True
     state = env.reset()
+    mcts.root = None
     cur_move = 1
     while not done:
+        print(f"Starting Turn: {cur_move}")
         if player == model_is_white:
-            action_probs = mcts.search(state, player)
-            action = np.argmax(action_probs)
+            action_probs = mcts.search(state)
+            flat_index = np.argmax(action_probs)
+            action = np.unravel_index(flat_index, action_probs.shape)
         else:
             legal_moves = list(env.board.legal_moves)
             move = random.choice(legal_moves)
-            action = env.encode_action(move, env.board.turn)
+            action = ChessEnv.encode_action(move, env.board)
         state, done = env.step(action)
+        mcts.advance_root(action)
         player = not player
         cur_move += 1
         if cur_move % 50 == 0:

@@ -340,7 +340,7 @@ def test_flipped_board():
             [   #L Direction (Distance 7)
                 *Z[0:8]
             ],
-            [   #NR Direction (Distance 1) ERROR
+            [   #NR Direction (Distance 1)
                 [0,0,1,1,0,0,0,0],
                 Z[0],
                 Z[0],

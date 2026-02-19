@@ -42,7 +42,8 @@ class ChessEnv(gym.Env):
         move = ChessEnv.decode_action(action, self.board)
 
         if move not in self.board.legal_moves:
-            print("Illegal move chosen")
+            print(f"Illegal move chosen: {move.uci()}")
+            print(f"{self.board.fen()}")
             return self._get_obs(), True
 
         self.board.push(move)

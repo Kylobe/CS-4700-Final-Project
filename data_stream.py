@@ -2,13 +2,13 @@ import os
 import glob
 import random
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
+import numpy as np
 
 import torch
 from torch.utils.data import IterableDataset, DataLoader, get_worker_info
 
 
 Sample = Any  # can be (x, policy, value), dict, etc.
-
 
 def _iter_samples_from_loaded(obj: Any) -> Iterator[Sample]:
     """
@@ -138,38 +138,61 @@ class PtShardStream(IterableDataset):
             while buffer:
                 yield from emit_from_buffer()
 
-def smart_collate(batch: Sequence[Sample]) -> Any:
-    """
-    If samples are dicts of tensors, stack per key.
-    If samples are tuples/lists of tensors, stack element-wise.
-    Otherwise, fall back to default behavior.
-    """
+def _as_tensor(x: Any) -> torch.Tensor:
+    if torch.is_tensor(x):
+        return x
+    if isinstance(x, np.ndarray):
+        # If you ever hit "not writable" warnings, swap to: np.array(x, copy=True)
+        return torch.from_numpy(x)
+    # python numbers / lists / tuples
+    return torch.as_tensor(x)
+
+def smart_collate(batch: Sequence[Any]) -> Any:
     first = batch[0]
 
     if isinstance(first, dict):
         out: Dict[str, Any] = {}
         for k in first.keys():
             vals = [b[k] for b in batch]
-            if torch.is_tensor(vals[0]):
-                out[k] = torch.stack(vals, dim=0)
+
+            # stack if *all* are stackable tensor-ish, otherwise keep list
+            if all(torch.is_tensor(v) or isinstance(v, (np.ndarray, int, float, list, tuple)) for v in vals):
+                # only stack if shapes match (otherwise you probably want a list)
+                try:
+                    tvals = [_as_tensor(v) for v in vals]
+                    out[k] = torch.stack(tvals, dim=0)
+                except Exception:
+                    out[k] = vals
             else:
                 out[k] = vals
         return out
 
     if isinstance(first, (tuple, list)):
-        # element-wise stack
         transposed = list(zip(*batch))
         stacked = []
         for vals in transposed:
-            if torch.is_tensor(vals[0]):
-                stacked.append(torch.stack(list(vals), dim=0))
-            else:
-                stacked.append(list(vals))
+            vals = list(vals)
+
+            # try to stack after converting numpy/scalars -> tensor
+            try:
+                tvals = [_as_tensor(v) for v in vals]
+                # only stack if all tensors have same shape
+                if all(t.shape == tvals[0].shape for t in tvals):
+                    stacked.append(torch.stack(tvals, dim=0))
+                else:
+                    stacked.append(vals)  # variable-length things (like move lists)
+            except Exception:
+                stacked.append(vals)
+
         return tuple(stacked) if isinstance(first, tuple) else stacked
 
-    # single tensor
-    if torch.is_tensor(first):
-        return torch.stack(list(batch), dim=0)
+    # single item per sample
+    try:
+        tvals = [_as_tensor(v) for v in batch]
+        if all(t.shape == tvals[0].shape for t in tvals):
+            return torch.stack(tvals, dim=0)
+    except Exception:
+        pass
 
     return list(batch)
 
