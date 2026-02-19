@@ -111,8 +111,7 @@ class Node:
                 Node.back_prop_terminal(node.parent)
 
 class MCTS:
-    def __init__(self, env:ChessEnv, args, model):
-        self.env:ChessEnv = env
+    def __init__(self, args, model):
         self.args = args
         self.model = model
         self.root = None
@@ -153,11 +152,14 @@ class MCTS:
         self.root = None
 
     @torch.no_grad
-    def search(self, state):
+    def search(self, state, num_searches:int = None):
         if self.root is None:
             self.create_root(state)
 
-        for _ in range(self.args['num_searches']):
+        if num_searches is None:
+            num_searches = self.args['num_searches']
+
+        for _ in range(num_searches):
             if self.root.terminated:
                 if self.root.win_val == 1:
                     action_probs = np.zeros((73, 8, 8), dtype=np.float32)
@@ -213,11 +215,12 @@ class MCTS:
                     # one-hot policy on the TB move
                     mask = ChessEnv.create_plane_action_mask(node.game)
                     policy = np.zeros_like(mask, dtype=np.float32)
-                    idx = self.env.encode_action(best_move, node.game.turn)  # make sure you have encode_action(turn-aware)
+                    idx = ChessEnv.encode_action(best_move, node.game.turn)  # make sure you have encode_action(turn-aware)
                     policy[idx] = 1.0
+                    legal_actions = np.nonzero(policy)
 
                     # expand with TB policy (single child), and use tb_value if available
-                    node.expand(policy, self.env)
+                    node.expand(policy, legal_actions)
                     value = node.win_val if tb_value is None else tb_value
                 else:
                     # fall back to NN

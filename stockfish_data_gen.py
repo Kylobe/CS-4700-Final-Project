@@ -157,7 +157,7 @@ def data_gen(env: ChessEnv, engine, n = None, length_of_file = 10000):
 
 def label_board(engine, board: chess.Board):
     state_tensor = ChessEnv.encode_board(board)
-    k = min(len(list(board.legal_moves)), len(list(board.legal_moves)))
+    k = min(len(list(board.legal_moves)), 8)
     info_list = engine.analyse(board, chess.engine.Limit(depth=5), multipv=k)
     value_label = eval_to_value(info_list[0]["score"], board.turn)
     policy_label = sf_scores_to_probs_plane(info_list, board)
@@ -458,10 +458,10 @@ def parallel_data_gen(num_workers: int, files_per_worker: int, length_of_file: i
 def main():
     mp.freeze_support()  # safe on Windows
     parallel_data_gen(
-        num_workers=4,          # start with #physical cores or slightly less
-        files_per_worker=4,     # each worker writes this many files
-        length_of_file=1000,    # samples per file (your length_of_file)
-        out_dir="Stockfish_data_val",
+        num_workers=9,          # start with #physical cores or slightly less
+        files_per_worker=100,     # each worker writes this many files
+        length_of_file=10000,    # samples per file (your length_of_file)
+        out_dir="Stockfish_data",
         engine_path=get_engine_path(),
         db_path="stockfish_label_cache.db",
         stagger_seconds=10

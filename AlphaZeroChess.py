@@ -27,7 +27,7 @@ class ResBlock(nn.Module):
         return x
 
 class AlphaZeroChess(nn.Module):
-    def __init__(self, env, num_resBlocks, num_hidden):
+    def __init__(self, num_resBlocks, num_hidden):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -76,7 +76,7 @@ class AlphaZero:
         self.optimizer = optimizer
         self.env:ChessEnv = env
         self.args = args
-        self.mcts = MCTS(env=env, args=args, model=model)
+        self.mcts = MCTS(args=args, model=model)
 
     def self_play(self):
         memory = []

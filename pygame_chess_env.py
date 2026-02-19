@@ -1,6 +1,16 @@
 import sys
+import time
+import threading
+import queue
 import pygame
 import chess
+from MCTS import MCTS
+from AlphaZeroChess import AlphaZeroChess
+import torch
+import numpy as np
+from ChessEnv import ChessEnv
+import chess.engine
+
 
 # -----------------------------
 # Config
@@ -22,25 +32,87 @@ TEXT = (20, 20, 20)
 BG_PANEL = (245, 245, 245)
 LINE = (210, 210, 210)
 
-# Unicode chess pieces (works well in many fonts)
 UNICODE_PIECE = {
     "P": "♙", "N": "♘", "B": "♗", "R": "♖", "Q": "♕", "K": "♔",
     "p": "♟", "n": "♞", "b": "♝", "r": "♜", "q": "♛", "k": "♚",
 }
 
 # -----------------------------
+# Bot interface (YOU IMPLEMENT)
+# -----------------------------
+class MCTSBot:
+    """
+    Implement choose_move(board) to return a python-chess Move.
+    board is a python-chess Board in the current position (Black to move).
+    """
+
+    def __init__(self, max_think_time_s: float):
+        args = {
+            'C': 2,
+            'num_searches': 1600,
+            'lr': 1e-4,
+            'weight_decay': 1e-4,
+            'res_blocks': 40,
+            'num_hidden': 256,
+        }
+
+        # Your trained model
+        model = AlphaZeroChess(num_resBlocks=args['res_blocks'], num_hidden=args['num_hidden'])
+
+        model.load_state_dict(torch.load("PretrainModel.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
+        model.eval()
+        self.mcts = MCTS(args=args, model=model)
+        self.max_think_time_s = max_think_time_s
+
+    def choose_move(self, board: chess.Board) -> chess.Move:
+        action_probs = self.mcts.search(board)
+        flat_index = np.argmax(action_probs)
+        action = np.unravel_index(flat_index, action_probs.shape)
+        return ChessEnv.decode_action(action, board)
+
+    def update_root(self, action):
+        self.mcts.advance_root(action)
+
+    def reset_root(self):
+        self.mcts.root = None
+
+    def create_root(self, board):
+        self.mcts.create_root(board)
+
+class StockFishBot:
+    def __init__(self, max_think_time_s: float):
+        self.engine = chess.engine.SimpleEngine.popen_uci(r"C:\Users\Traedon Harris\Documents\GitHub\CS-4700-Final-Project\stockfish\stockfish-windows-x86-64-avx2.exe")
+        self.max_think_time_s = max_think_time_s
+
+
+    def choose_move(self, board: chess.Board) -> chess.Move:
+        result = self.engine.play(
+            board,
+            chess.engine.Limit(depth=5)
+        )
+        return result.move
+
+    def update_root(self, action):
+        pass
+
+    def reset_root(self):
+        pass
+
+    def create_root(self, board):
+        pass
+
+
+# -----------------------------
 # Helpers
 # -----------------------------
 def square_to_xy(square: chess.Square) -> tuple[int, int]:
-    """Map python-chess square -> top-left pixel (x,y) with White at bottom."""
-    file = chess.square_file(square)  # 0..7 (a..h)
-    rank = chess.square_rank(square)  # 0..7 (1..8)
+    file = chess.square_file(square)
+    rank = chess.square_rank(square)
     x = file * SQ_SIZE
     y = (7 - rank) * SQ_SIZE
     return x, y
 
-def xy_to_square(mx: int, my: int) -> chess.Square | None:
-    """Map mouse pixel -> python-chess square, or None if outside board."""
+def xy_to_square(mx: int, my: int):
     if mx < 0 or my < 0 or mx >= BOARD_SIZE or my >= BOARD_SIZE:
         return None
     file = mx // SQ_SIZE
@@ -49,7 +121,6 @@ def xy_to_square(mx: int, my: int) -> chess.Square | None:
     return chess.square(file, rank)
 
 def draw_board(screen, selected_sq, legal_to_sqs, capture_to_sqs, last_move):
-    # Draw squares
     for rank in range(8):
         for file in range(8):
             x = file * SQ_SIZE
@@ -58,7 +129,6 @@ def draw_board(screen, selected_sq, legal_to_sqs, capture_to_sqs, last_move):
             color = LIGHT if is_light else DARK
             screen.fill(color, (x, y, SQ_SIZE, SQ_SIZE))
 
-    # Highlight last move
     if last_move is not None:
         for sq in [last_move.from_square, last_move.to_square]:
             x, y = square_to_xy(sq)
@@ -66,28 +136,24 @@ def draw_board(screen, selected_sq, legal_to_sqs, capture_to_sqs, last_move):
             s.fill((*HILITE_LAST, 120))
             screen.blit(s, (x, y))
 
-    # Highlight selected square
     if selected_sq is not None:
         x, y = square_to_xy(selected_sq)
         s = pygame.Surface((SQ_SIZE, SQ_SIZE), pygame.SRCALPHA)
         s.fill((*HILITE_SEL, 130))
         screen.blit(s, (x, y))
 
-    # Highlight legal moves
     for sq in legal_to_sqs:
         x, y = square_to_xy(sq)
         s = pygame.Surface((SQ_SIZE, SQ_SIZE), pygame.SRCALPHA)
         s.fill((*HILITE_MOVE, 110))
         screen.blit(s, (x, y))
 
-    # Highlight captures a bit differently
     for sq in capture_to_sqs:
         x, y = square_to_xy(sq)
         s = pygame.Surface((SQ_SIZE, SQ_SIZE), pygame.SRCALPHA)
         s.fill((*HILITE_CAP, 130))
         screen.blit(s, (x, y))
 
-    # Grid lines
     for i in range(9):
         pygame.draw.line(screen, (0, 0, 0), (i * SQ_SIZE, 0), (i * SQ_SIZE, BOARD_SIZE), 1)
         pygame.draw.line(screen, (0, 0, 0), (0, i * SQ_SIZE), (BOARD_SIZE, i * SQ_SIZE), 1)
@@ -98,13 +164,11 @@ def draw_pieces(screen, board, piece_font):
         if piece:
             sym = UNICODE_PIECE[piece.symbol()]
             x, y = square_to_xy(square)
-            # Center the glyph in the square
             surf = piece_font.render(sym, True, (0, 0, 0))
             rect = surf.get_rect(center=(x + SQ_SIZE // 2, y + SQ_SIZE // 2 + 2))
             screen.blit(surf, rect)
 
-def draw_panel(screen, board, ui_font, small_font, status_msg):
-    # Panel background
+def draw_panel(screen, board, ui_font, small_font, status_msg, bot_thinking: bool):
     screen.fill(BG_PANEL, (BOARD_SIZE, 0, PANEL_W, H))
     pygame.draw.line(screen, LINE, (BOARD_SIZE, 0), (BOARD_SIZE, H), 2)
 
@@ -117,10 +181,9 @@ def draw_panel(screen, board, ui_font, small_font, status_msg):
         screen.blit(surf, (x0, y))
         y += surf.get_height() + pad
 
-    line("Chess (Pygame)")
+    line("Chess (Human vs MCTS)")
     line(f"Turn: {'White' if board.turn else 'Black'}", pad=6)
 
-    # Game state
     if board.is_checkmate():
         line("Checkmate!", pad=4)
         line(f"Winner: {'Black' if board.turn else 'White'}", pad=10)
@@ -131,13 +194,16 @@ def draw_panel(screen, board, ui_font, small_font, status_msg):
     elif board.is_check():
         line("Check!", pad=10)
 
+    if bot_thinking:
+        line("Bot: thinking...", pad=10)
+
     line("Controls:", pad=6)
-    line("• Click piece, then click target", small_font, pad=6)
-    line("• R = reset game", small_font, pad=6)
-    line("• U = undo move", small_font, pad=12)
+    line("• You are White", small_font, pad=6)
+    line("• Click piece, then target", small_font, pad=6)
+    line("• R = reset", small_font, pad=6)
+    line("• U = undo (2 plies)", small_font, pad=12)
 
     if status_msg:
-        # Wrap-ish: just render multiple lines manually
         y += 6
         for part in status_msg.split("\n"):
             surf = small_font.render(part, True, (60, 60, 60))
@@ -145,45 +211,83 @@ def draw_panel(screen, board, ui_font, small_font, status_msg):
             y += surf.get_height() + 4
 
 def choose_promotion_piece(board, move: chess.Move) -> chess.PieceType:
-    """
-    Minimal promotion logic: auto-queen.
-    You can expand this to UI selection.
-    """
     return chess.QUEEN
+
+
+# -----------------------------
+# Bot threading (keeps UI alive)
+# -----------------------------
+def bot_worker(req_q: "queue.Queue[str]", res_q: "queue.Queue[chess.Move]", bot: MCTSBot, board_ref):
+    """
+    Wait for 'go' messages; compute a move from a *copy* of the board to avoid races.
+    """
+    while True:
+        msg = req_q.get()
+        if msg is None:
+            return
+        # Copy board so bot can think without UI thread mutating it
+        board_copy = board_ref.copy(stack=False)
+        mv = bot.choose_move(board_copy)
+        res_q.put(mv)
+
 
 def main():
     pygame.init()
     screen = pygame.display.set_mode((W, H))
-    pygame.display.set_caption("Pygame Chess")
+    pygame.display.set_caption("Pygame Chess - Human vs MCTS")
     clock = pygame.time.Clock()
 
-    # Fonts: try common fonts; fallback to default
     piece_font = pygame.font.SysFont("Segoe UI Symbol", 56) or pygame.font.Font(None, 56)
     ui_font = pygame.font.SysFont("Segoe UI", 24) or pygame.font.Font(None, 24)
     small_font = pygame.font.SysFont("Segoe UI", 18) or pygame.font.Font(None, 18)
 
     board = chess.Board()
 
+    # Human is White
+    HUMAN_COLOR = chess.WHITE
+    BOT_COLOR = chess.BLACK
+
+    bot = StockFishBot(max_think_time_s=300)
+    bot.create_root(board)
+
     selected_sq = None
-    legal_moves_from_selected = []   # list[chess.Move]
+    legal_moves_from_selected = []
     legal_to_sqs = set()
     capture_to_sqs = set()
     last_move = None
-    status_msg = "Select a piece to see legal moves."
+    status_msg = "You are White. Make a move."
+
+    bot_thinking = False
+    bot_req_q: "queue.Queue[str]" = queue.Queue()
+    bot_res_q: "queue.Queue[chess.Move]" = queue.Queue()
+    t = threading.Thread(target=bot_worker, args=(bot_req_q, bot_res_q, bot, board), daemon=True)
+    t.start()
+
+    def clear_selection():
+        nonlocal selected_sq, legal_moves_from_selected, legal_to_sqs, capture_to_sqs
+        selected_sq = None
+        legal_moves_from_selected = []
+        legal_to_sqs.clear()
+        capture_to_sqs.clear()
 
     def recompute_legal(selected):
         nonlocal legal_moves_from_selected, legal_to_sqs, capture_to_sqs
         legal_moves_from_selected = []
         legal_to_sqs = set()
         capture_to_sqs = set()
+
         if selected is None:
             return
         piece = board.piece_at(selected)
         if piece is None:
             return
-        # only allow selecting side to move
-        if piece.color != board.turn:
+
+        # Only allow selecting YOUR pieces, and only on YOUR turn
+        if board.turn != HUMAN_COLOR:
             return
+        if piece.color != HUMAN_COLOR:
+            return
+
         for mv in board.legal_moves:
             if mv.from_square == selected:
                 legal_moves_from_selected.append(mv)
@@ -191,37 +295,82 @@ def main():
                 if board.is_capture(mv):
                     capture_to_sqs.add(mv.to_square)
 
-    def try_make_move(from_sq, to_sq):
+    def try_make_human_move(from_sq, to_sq) -> bool:
         nonlocal last_move, status_msg
-        if from_sq is None or to_sq is None:
+        if board.turn != HUMAN_COLOR:
             return False
 
-        # Find a legal move that matches from/to (and handle promotions)
-        candidate_moves = [mv for mv in legal_moves_from_selected if mv.to_square == to_sq and mv.from_square == from_sq]
+        candidate_moves = [mv for mv in legal_moves_from_selected
+                           if mv.to_square == to_sq and mv.from_square == from_sq]
         if not candidate_moves:
             return False
 
-        # If promotion is possible there may be multiple legal promotion moves.
         mv = None
         if len(candidate_moves) == 1:
             mv = candidate_moves[0]
         else:
-            # Choose promotion piece (auto-queen)
             promo = choose_promotion_piece(board, candidate_moves[0])
             for cm in candidate_moves:
                 if cm.promotion == promo:
                     mv = cm
                     break
             mv = mv or candidate_moves[0]
-        
+
+        encoded_action = ChessEnv.encode_action(mv, board)
+
+        bot.update_root(encoded_action)
+
         board.push(mv)
         last_move = mv
-        status_msg = f"Played: {mv.uci()}"
+        status_msg = f"You played: {mv.uci()}"
         return True
+
+    def start_bot_turn_if_needed():
+        nonlocal bot_thinking, status_msg
+        if board.is_game_over():
+            return
+        if board.turn == BOT_COLOR and not bot_thinking:
+            bot_thinking = True
+            status_msg = "Bot thinking..."
+            bot_req_q.put("go")
+
+    def apply_bot_move_if_ready():
+        nonlocal bot_thinking, last_move, status_msg
+        if not bot_thinking:
+            return
+        try:
+            mv = bot_res_q.get_nowait()
+        except queue.Empty:
+            return
+
+        bot_thinking = False
+
+        # Safety: ensure move is legal in current board
+        if mv not in board.legal_moves:
+            # Fallback if bot returned something stale/illegal
+            mv = next(iter(board.legal_moves))
+            status_msg = "Bot returned illegal move; used fallback."
+        else:
+            status_msg = f"Bot played: {mv.uci()}"
+
+        encoded_move = ChessEnv.encode_action(mv, board)
+        bot.update_root(encoded_move)
+
+        board.push(mv)
+        last_move = mv
+
+    # Kick off bot if Black starts (it won’t, since White starts)
+    start_bot_turn_if_needed()
 
     running = True
     while running:
         clock.tick(FPS)
+
+        # If bot finished thinking, apply its move
+        apply_bot_move_if_ready()
+
+        # If it's bot's turn, ensure bot is running
+        start_bot_turn_if_needed()
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -230,53 +379,45 @@ def main():
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_r:
                     board.reset()
-                    selected_sq = None
-                    legal_to_sqs.clear()
-                    capture_to_sqs.clear()
-                    legal_moves_from_selected = []
                     last_move = None
-                    status_msg = "Game reset."
-                elif event.key == pygame.K_u:
-                    if board.move_stack:
-                        board.pop()
-                        selected_sq = None
-                        legal_to_sqs.clear()
-                        capture_to_sqs.clear()
-                        legal_moves_from_selected = []
-                        last_move = board.peek() if board.move_stack else None
-                        status_msg = "Undid last move."
+                    bot_thinking = False
+                    while not bot_req_q.empty():
+                        bot_req_q.get_nowait()
+                    while not bot_res_q.empty():
+                        bot_res_q.get_nowait()
+                    clear_selection()
+                    status_msg = "Game reset. You are White."
+                    bot.reset_root()
+                    bot.create_root(board)
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if bot_thinking:
+                    continue
+                if board.is_game_over():
+                    continue
+                if board.turn != HUMAN_COLOR:
+                    continue  # ignore clicks on bot's turn
+
                 mx, my = pygame.mouse.get_pos()
                 sq = xy_to_square(mx, my)
-
                 if sq is None:
-                    # clicked in panel area
                     continue
 
-                # If no selection yet: select if it's your piece
                 if selected_sq is None:
                     piece = board.piece_at(sq)
-                    if piece and piece.color == board.turn:
+                    if piece and piece.color == HUMAN_COLOR:
                         selected_sq = sq
                         recompute_legal(selected_sq)
-                        if legal_to_sqs:
-                            status_msg = "Select a destination square."
-                        else:
-                            status_msg = "No legal moves for that piece."
+                        status_msg = "Select a destination square." if legal_to_sqs else "No legal moves."
                     else:
-                        status_msg = "Select one of your pieces."
+                        status_msg = "Select one of your (White) pieces."
                 else:
-                    # Attempt move
-                    moved = try_make_move(selected_sq, sq)
-                    selected_sq = None
-                    legal_to_sqs.clear()
-                    capture_to_sqs.clear()
-                    legal_moves_from_selected = []
+                    moved = try_make_human_move(selected_sq, sq)
+                    clear_selection()
                     if not moved:
-                        # If clicked another of your pieces, select that instead
+                        # allow reselect
                         piece = board.piece_at(sq)
-                        if piece and piece.color == board.turn:
+                        if piece and piece.color == HUMAN_COLOR:
                             selected_sq = sq
                             recompute_legal(selected_sq)
                             status_msg = "Switched selection."
@@ -286,12 +427,16 @@ def main():
         # Draw
         draw_board(screen, selected_sq, legal_to_sqs, capture_to_sqs, last_move)
         draw_pieces(screen, board, piece_font)
-        draw_panel(screen, board, ui_font, small_font, status_msg)
-
+        draw_panel(screen, board, ui_font, small_font, status_msg, bot_thinking)
         pygame.display.flip()
 
+    # stop worker thread
+    bot_req_q.put(None)
     pygame.quit()
     sys.exit()
+    bot.engine.quit()
+
+
 
 if __name__ == "__main__":
     main()

@@ -512,20 +512,20 @@ def main():
     config = {
         'lr': 1e-4,
         'weight_decay': 1e-4,
-        'res_blocks': 80,
-        'num_hidden': 512,
+        'res_blocks': 40,
+        'num_hidden': 256,
         'batch_size': 64,
         'epochs': 50
     }
 
-    model = AlphaZeroChess(env, num_resBlocks=config['res_blocks'], num_hidden=config['num_hidden'])
+    model = AlphaZeroChess(num_resBlocks=config['res_blocks'], num_hidden=config['num_hidden'])
     optimizer = optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
     scheduler = CosineAnnealingLR(optimizer, T_max=50)
     alpha = AlphaZero(model, optimizer, env, config)
 
     # ---- Streaming train loader (ALL 47GB) ----
     stream_ds, train_loader = make_stream_loader(
-        root_dir="Stockfish_data_val",
+        root_dir="Stockfish_data",
         batch_size=config["batch_size"],
         num_workers=4,          # tune: 4/8/12 depending on CPU
         shuffle_buffer=50_000,  # tune down if RAM spikes
@@ -538,9 +538,6 @@ def main():
     data = load_all_data("Stockfish_data_val", max_len=50_000) \
         if os.path.isdir("Stockfish_data_val") else load_all_data("Stockfish_data", max_len=50_000)
 
-    np.random.shuffle(data)
-    data = data[:64]
-    train_data = data
     val_data = data
 
     best_policy_loss = compute_policy_validation_loss(model, val_data, config["batch_size"])
@@ -552,13 +549,15 @@ def main():
     for epoch in range(config["epochs"]):
         stream_ds.set_epoch(epoch)
 
-        total_loss, policy_loss, value_loss = alpha.train(train_data)
+        total_loss, policy_loss, value_loss = alpha.train_loader(train_loader)
 
         scheduler.step()
         policy_val_loss = compute_policy_validation_loss(model, val_data, config["batch_size"])
         value_val_loss  = compute_value_validation_loss(model, val_data, config["batch_size"])
         if best_value_loss > value_val_loss:
             best_value_loss = value_val_loss
+            torch.save(model.state_dict(), "CurBestPretrainModel.pt")
+            torch.save(optimizer.state_dict, "CurBestOptim.pt")
         elif np.abs(best_value_loss - value_val_loss) > 0.005:
             bad_epochs += 1
         if best_policy_loss > policy_val_loss:
@@ -573,9 +572,6 @@ def main():
         if bad_epochs >= patience:
             print(f"Model Validition Loss Is Not Improving. Stopping Training.")
             break
-
-    torch.save(model.state_dict(), "PretrainModel.pt")
-    torch.save(optimizer.state_dict(), "PretrainOptimizer.pt")
 
 
 
