@@ -64,10 +64,36 @@ class MCTSBot:
         self.mcts = MCTS(args=args, model=model)
         self.max_think_time_s = max_think_time_s
 
+    @staticmethod
+    def top_k_percent(action_probs, k:float=0.5):
+        flat = action_probs.reshape(-1)
+
+        # Get indices sorted by probability (descending)
+        sorted_indices = np.argsort(flat)[::-1]
+
+        new_flat = np.zeros_like(flat)
+
+        total = 0.0
+        for idx in sorted_indices:
+            prob = flat[idx]
+            new_flat[idx] = prob
+            total += prob
+            if total >= k:
+                break
+
+        # Renormalize
+        s = new_flat.sum()
+        if s > 0:
+            new_flat /= s
+
+        return new_flat.reshape(action_probs.shape)
+
     def choose_move(self, board: chess.Board) -> chess.Move:
         action_probs = self.mcts.search(board)
-        flat_index = np.argmax(action_probs)
-        action = np.unravel_index(flat_index, action_probs.shape)
+        action_probs = MCTSBot.top_k_percent(action_probs, k=.25)
+        flat = action_probs.reshape(-1)
+        index = np.random.choice(len(flat), p=flat)
+        action = np.unravel_index(index, action_probs.shape)
         return ChessEnv.decode_action(action, board)
 
     def update_root(self, action):
@@ -78,28 +104,6 @@ class MCTSBot:
 
     def create_root(self, board):
         self.mcts.create_root(board)
-
-class StockFishBot:
-    def __init__(self, max_think_time_s: float):
-        self.engine = chess.engine.SimpleEngine.popen_uci(r"C:\Users\Traedon Harris\Documents\GitHub\CS-4700-Final-Project\stockfish\stockfish-windows-x86-64-avx2.exe")
-        self.max_think_time_s = max_think_time_s
-
-
-    def choose_move(self, board: chess.Board) -> chess.Move:
-        result = self.engine.play(
-            board,
-            chess.engine.Limit(depth=5)
-        )
-        return result.move
-
-    def update_root(self, action):
-        pass
-
-    def reset_root(self):
-        pass
-
-    def create_root(self, board):
-        pass
 
 
 # -----------------------------
@@ -247,7 +251,7 @@ def main():
     HUMAN_COLOR = chess.WHITE
     BOT_COLOR = chess.BLACK
 
-    bot = StockFishBot(max_think_time_s=300)
+    bot = MCTSBot(max_think_time_s=300)
     bot.create_root(board)
 
     selected_sq = None
