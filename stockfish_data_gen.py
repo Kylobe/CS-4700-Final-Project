@@ -16,6 +16,14 @@ import time
 from typing import Optional, Tuple, List
 import chess.polyglot
 
+from pathlib import Path
+
+def get_engine_path() -> str:
+    # folder where stockfish_data_gen.py lives
+    root = Path(__file__).resolve().parent
+    exe = root/"stockfish"/"stockfish-windows-x86-64-avx2.exe"
+    return str(exe)
+
 def sf_scores_to_probs_plane(info_list, board):
     # policy target is plane-based
     policy = np.zeros((73, 8, 8), dtype=np.float32)
@@ -149,8 +157,8 @@ def data_gen(env: ChessEnv, engine, n = None, length_of_file = 10000):
 
 def label_board(engine, board: chess.Board):
     state_tensor = ChessEnv.encode_board(board)
-    k = min(len(list(board.legal_moves)), 8)
-    info_list = engine.analyse(board, chess.engine.Limit(depth=18), multipv=k)
+    k = min(len(list(board.legal_moves)), len(list(board.legal_moves)))
+    info_list = engine.analyse(board, chess.engine.Limit(depth=5), multipv=k)
     value_label = eval_to_value(info_list[0]["score"], board.turn)
     policy_label = sf_scores_to_probs_plane(info_list, board)
     action_mask = ChessEnv.create_plane_action_mask(board)
@@ -348,13 +356,14 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
 
     memory = []
     files_saved = 0
-    local_index = 0
+
     game_counter = 0
 
     try:
         while files_saved < n_files:
             board = env.reset()
             game_counter += 1
+            move_count = 0
             print(f"[Worker {worker_id}] Starting Game: {game_counter}")
             while not board.is_game_over():
                 legal_moves = list(board.legal_moves)
@@ -400,10 +409,10 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
                 action = select_move_least_visited_then_best(conn, board, candidates, policy_label)
 
                 memory.append(label)
-                if local_index % 10 == 0:
+                if move_count % 10 == 0:
                     print(f"[Worker {worker_id}] played: {action.uci()}, for the posistion: {board.fen()}")
                 board.push(action)
-                local_index += 1
+                move_count += 1
                 
 
             if len(memory) % 100 == 0:
@@ -449,13 +458,13 @@ def parallel_data_gen(num_workers: int, files_per_worker: int, length_of_file: i
 def main():
     mp.freeze_support()  # safe on Windows
     parallel_data_gen(
-        num_workers=10,          # start with #physical cores or slightly less
-        files_per_worker=100,     # each worker writes this many files
+        num_workers=4,          # start with #physical cores or slightly less
+        files_per_worker=4,     # each worker writes this many files
         length_of_file=1000,    # samples per file (your length_of_file)
         out_dir="Stockfish_data_val",
-        engine_path=ENGINE_PATH,
+        engine_path=get_engine_path(),
         db_path="stockfish_label_cache.db",
-        stagger_seconds=2.0
+        stagger_seconds=10
     )
 
 if __name__ == "__main__":

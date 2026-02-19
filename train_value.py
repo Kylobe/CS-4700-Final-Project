@@ -512,9 +512,9 @@ def main():
     config = {
         'lr': 1e-4,
         'weight_decay': 1e-4,
-        'res_blocks': 40,
-        'num_hidden': 256,
-        'batch_size': 256,
+        'res_blocks': 80,
+        'num_hidden': 512,
+        'batch_size': 64,
         'epochs': 50
     }
 
@@ -527,7 +527,7 @@ def main():
     stream_ds, train_loader = make_stream_loader(
         root_dir="Stockfish_data_val",
         batch_size=config["batch_size"],
-        num_workers=8,          # tune: 4/8/12 depending on CPU
+        num_workers=4,          # tune: 4/8/12 depending on CPU
         shuffle_buffer=50_000,  # tune down if RAM spikes
         seed=123,
         pin_memory=(model.device.type == "cuda"),
@@ -535,23 +535,28 @@ def main():
 
     # ---- Small validation set in RAM (e.g., first N samples) ----
     # Easiest: reuse your old loader but cap it
-    val_samples = load_all_data("Stockfish_data_val", max_len=50_000) \
+    data = load_all_data("Stockfish_data_val", max_len=50_000) \
         if os.path.isdir("Stockfish_data_val") else load_all_data("Stockfish_data", max_len=50_000)
 
-    best_policy_loss = compute_policy_validation_loss(model, val_samples, config["batch_size"])
-    best_value_loss = compute_value_validation_loss(model, val_samples, config["batch_size"])
+    np.random.shuffle(data)
+    data = data[:64]
+    train_data = data
+    val_data = data
+
+    best_policy_loss = compute_policy_validation_loss(model, val_data, config["batch_size"])
+    best_value_loss = compute_value_validation_loss(model, val_data, config["batch_size"])
     bad_epochs = 0
-    patience = 2
+    patience = 1000
     print(f"Before Training The Total Validation Loss: {best_policy_loss + best_value_loss}, Policy Loss: {best_policy_loss}, Value Loss: {best_value_loss}")
     print("training (streaming)")
     for epoch in range(config["epochs"]):
         stream_ds.set_epoch(epoch)
 
-        total_loss, policy_loss, value_loss = alpha.train_loader(train_loader)
+        total_loss, policy_loss, value_loss = alpha.train(train_data)
 
         scheduler.step()
-        policy_val_loss = compute_policy_validation_loss(model, val_samples, config["batch_size"])
-        value_val_loss  = compute_value_validation_loss(model, val_samples, config["batch_size"])
+        policy_val_loss = compute_policy_validation_loss(model, val_data, config["batch_size"])
+        value_val_loss  = compute_value_validation_loss(model, val_data, config["batch_size"])
         if best_value_loss > value_val_loss:
             best_value_loss = value_val_loss
         elif np.abs(best_value_loss - value_val_loss) > 0.005:

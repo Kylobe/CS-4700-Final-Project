@@ -10,7 +10,7 @@ import torch.optim as optim
 import os
 import random
 from collections import deque
-import gym
+import gymnasium as gym
 from ChessEnv import ChessEnv
 import threading
 import sys
