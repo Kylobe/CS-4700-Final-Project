@@ -7,10 +7,17 @@ import random
 import chess
 import chess.engine
 
+from pathlib import Path
+
+def get_engine_path() -> str:
+    # folder where stockfish_data_gen.py lives
+    root = Path(__file__).resolve().parent
+    exe = root/"stockfish"/"stockfish-windows-x86-64-avx2.exe"
+    return str(exe)
 
 args = {
     'C': 2,
-    'num_searches': 200,
+    'num_searches': 800,
     'lr': 1e-4,
     'weight_decay': 1e-4,
     'res_blocks': 40,
@@ -24,11 +31,11 @@ done = False
 # Your trained model
 model = AlphaZeroChess(num_resBlocks=args['res_blocks'], num_hidden=args['num_hidden'])
 
-model.load_state_dict(torch.load("PretrainModel.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
+model.load_state_dict(torch.load("CurBestPretrainModel.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
 model.eval()
 mcts = MCTS(args=args, model=model)
 
-engine = chess.engine.SimpleEngine.popen_uci(r"C:\Users\Traedon Harris\Documents\GitHub\CS-4700-Final-Project\stockfish\stockfish-windows-x86-64-avx2.exe")
+engine = chess.engine.SimpleEngine.popen_uci(get_engine_path())
 
 def model_vs_random():
     player = True
