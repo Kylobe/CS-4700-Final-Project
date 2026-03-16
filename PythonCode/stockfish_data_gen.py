@@ -15,6 +15,7 @@ import json
 import time
 from typing import Optional, Tuple, List
 import chess.polyglot
+from tqdm import tqdm
 
 from pathlib import Path
 
@@ -85,8 +86,8 @@ def sf_scores_to_probs_plane(info_list, board):
 
 def analyze_value_distribution(samples):
     vals = np.array([v for (_, _, v, _) in samples])
-    print("Total samples:", len(vals))
-    print("Mean:", vals.mean(), "Std:", vals.std())
+    #print("Total samples:", len(vals))
+    #print("Mean:", vals.mean(), "Std:", vals.std())
 
     # Buckets by |value|
     bins = [0, 0.1, 0.3, 0.6, 1.1]
@@ -94,7 +95,7 @@ def analyze_value_distribution(samples):
 
     for (lo, hi), name in zip(zip(bins[:-1], bins[1:]), labels):
         mask = (np.abs(vals) >= lo) & (np.abs(vals) < hi)
-        print(f"{name}: {mask.mean()*100:.1f}% of samples")
+        #print(f"{name}: {mask.mean()*100:.1f}% of samples")
 
 def bucket_by_eval(samples):
     buckets = defaultdict(list)
@@ -147,19 +148,21 @@ def data_gen(env: ChessEnv, engine, n = None, length_of_file = 10000):
             label, action = label_board(engine, board)
             memory.append(label)
             board.push(action)
-        if len(memory) % 10 == 0:
-            print(f"Memory size is currently: {len(memory)}")
+        #if len(memory) % 10 == 0:
+            #print(f"Memory size is currently: {len(memory)}")
         if len(memory) >= length_of_file:
             files_saved += 1
             torch.save(memory, f"Stockfish_test_data\\labeled{files_saved}.pt")
-            print(f"Created new file labeled{files_saved}.pt")
+            #print(f"Created new file labeled{files_saved}.pt")
             memory = []
 
 def label_board(engine, board: chess.Board):
     state_tensor = ChessEnv.encode_board(board)
     k = min(len(list(board.legal_moves)), 8)
-    info_list = engine.analyse(board, chess.engine.Limit(depth=5), multipv=k)
-    value_label = eval_to_value(info_list[0]["score"], board.turn)
+    info_list = engine.analyse(board, chess.engine.Limit(depth=8), multipv=k)
+    value_info = engine.analyse(board, chess.engine.Limit(depth=13))
+    score = value_info["score"]
+    value_label = eval_to_value(score, board.turn)
     policy_label = sf_scores_to_probs_plane(info_list, board)
     action_mask = ChessEnv.create_plane_action_mask(board)
     action_mask = torch.tensor(action_mask, dtype=torch.float32)
@@ -169,7 +172,7 @@ UNDERPROMO = {chess.ROOK, chess.BISHOP, chess.KNIGHT}
 UNDERPROMO_SUFFIX = ("r", "b", "n")
 
 def parse_chess_puzzles(engine, env, chunk_size=10_000, out_dir="Stockfish_test_data"):
-    print("Reading Data Frame")
+    #print("Reading Data Frame")
     df = pd.read_csv("lichess_db_puzzle.csv")
 
     os.makedirs(out_dir, exist_ok=True)
@@ -177,7 +180,7 @@ def parse_chess_puzzles(engine, env, chunk_size=10_000, out_dir="Stockfish_test_
     memory = []
     files_saved = 0
 
-    print("Starting Labeling")
+    #print("Starting Labeling")
     for row in df.itertuples(index=False):
         # adjust names if your columns differ
         fen = row.FEN
@@ -211,7 +214,7 @@ def parse_chess_puzzles(engine, env, chunk_size=10_000, out_dir="Stockfish_test_
                     out_path = os.path.join(out_dir, f"labeled{files_saved}.pt")
                     torch.save(memory, out_path)
                     memory = []
-                    print(f"Saved New File: {out_path}")
+                    #print(f"Saved New File: {out_path}")
 
         except Exception:
             continue
@@ -243,13 +246,23 @@ def open_and_init_db(db_path: str) -> sqlite3.Connection:
         moves TEXT NOT NULL,
         policy_idx BLOB NOT NULL,
         policy_prob BLOB NOT NULL,
-        visits INTEGER NOT NULL DEFAULT 0
+        visits INTEGER NOT NULL DEFAULT 0,
+        is_validation_position INTEGER NOT NULL DEFAULT 0
     );
     """)
 
     # Migration for existing DB files
     try:
         conn.execute("ALTER TABLE labels ADD COLUMN visits INTEGER NOT NULL DEFAULT 0;")
+    except sqlite3.OperationalError:
+        # column already exists
+        pass
+    # Migration for is_validation_position column
+    try:
+        conn.execute("""
+            ALTER TABLE labels
+            ADD COLUMN is_validation_position INTEGER NOT NULL DEFAULT 0;
+        """)
     except sqlite3.OperationalError:
         # column already exists
         pass
@@ -263,16 +276,21 @@ def cache_peek_visits(conn: sqlite3.Connection, key: int) -> int:
 def cache_increment_visits(conn: sqlite3.Connection, key: int) -> None:
     conn.execute("UPDATE labels SET visits = visits + 1 WHERE k=?", (key,))
 
+def cache_mark_validation(conn: sqlite3.Connection, key: int):
+    conn.execute(
+        "UPDATE labels SET is_validation_position = 1 WHERE k=?",
+        (key,)
+    )
 
 def cache_get(conn: sqlite3.Connection, key: int):
     row = conn.execute(
-        "SELECT value, moves, policy_idx, policy_prob, visits FROM labels WHERE k=?",
+        "SELECT value, moves, policy_idx, policy_prob, visits, is_validation_position FROM labels WHERE k=?",
         (key,)
     ).fetchone()
     if row is None:
         return None
 
-    value, moves_json, idx_blob, prob_blob, visits = row
+    value, moves_json, idx_blob, prob_blob, visits, validation = row
 
     # TOUCH: increment visits because we visited this state
     conn.execute("UPDATE labels SET visits = visits + 1 WHERE k=?", (key,))
@@ -282,21 +300,24 @@ def cache_get(conn: sqlite3.Connection, key: int):
     prob = np.frombuffer(prob_blob, dtype=np.float32).copy()
     idx, prob = unpack_sparse_policy(idx, prob)
 
-    return float(value), moves, idx, prob, int(visits) + 1
+    return float(value), moves, idx, prob, int(visits) + 1, int(validation)
 
 def cache_put(conn: sqlite3.Connection, key: int, value: float, moves: list[str],
-              policy_idx: np.ndarray, policy_prob: np.ndarray) -> None:
+              policy_idx: np.ndarray, policy_prob: np.ndarray, validation) -> None:
     idx_blob, prob_blob = pack_sparse_policy(policy_idx, policy_prob)
     moves_json = json.dumps(moves)
 
-    conn.execute(
-        "INSERT OR IGNORE INTO labels (k, value, moves, policy_idx, policy_prob, visits) "
-        "VALUES (?, ?, ?, ?, ?, 0)",
-        (key, float(value), moves_json, idx_blob, prob_blob)
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO labels (k, value, moves, policy_idx, policy_prob, visits, is_validation_position) "
+        "VALUES (?, ?, ?, ?, ?, 0, ?)",
+        (key, float(value), moves_json, idx_blob, prob_blob, validation)
     )
+
+    inserted = (cur.rowcount == 1)
 
     # TOUCH: count this as a visit
     conn.execute("UPDATE labels SET visits = visits + 1 WHERE k=?", (key,))
+    return inserted
 
 def pack_sparse_policy(action_indices: np.ndarray, action_probs: np.ndarray) -> Tuple[bytes, bytes]:
     # indices int32, probs float32
@@ -346,7 +367,7 @@ def select_move_least_visited_then_best(
 
     return best_move
 
-def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: str, engine_path: str, db_path: str):
+def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: str, engine_path: str, db_path: str, creating_validation: bool = False):
     os.makedirs(out_dir, exist_ok=True)
 
     conn = open_and_init_db(db_path)
@@ -357,6 +378,14 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
     memory = []
     files_saved = 0
 
+    pbar = tqdm(
+        total=n_files,
+        desc=f"Worker {worker_id}",
+        position=worker_id,
+        leave=False,
+        dynamic_ncols=True
+    )
+
     game_counter = 0
 
     try:
@@ -364,7 +393,8 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
             board = env.reset()
             game_counter += 1
             move_count = 0
-            print(f"[Worker {worker_id}] Starting Game: {game_counter}")
+            #if (game_counter - 1) % 10 == 0:
+                #print(f"[Worker {worker_id}] Starting Game: {game_counter}")
             while not board.is_game_over():
                 legal_moves = list(board.legal_moves)
                 if not legal_moves:
@@ -372,28 +402,31 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
 
                 key = sqlite_int64_from_uint64(chess.polyglot.zobrist_hash(board))
                 hit = cache_get(conn, key)
+
                 if hit is not None:
-                    value_label, ranked_moves_uci, pol_idx, pol_prob, _ = hit
+                    value_label, ranked_moves_uci, pol_idx, pol_prob, _, is_validation = hit
 
                     state_tensor = ChessEnv.encode_board(board)
                     action_mask = torch.tensor(ChessEnv.create_plane_action_mask(board), dtype=torch.float32)
 
-                    # rebuild dense policy plane tensor
-                    policy_label = torch.zeros_like(action_mask)  # if same shape
+                    policy_label = torch.zeros_like(action_mask)
                     policy_label.view(-1)[torch.from_numpy(pol_idx)] = torch.from_numpy(pol_prob)
 
                     label = (state_tensor, policy_label, value_label, action_mask)
-
                     ranked_moves = [chess.Move.from_uci(u) for u in ranked_moves_uci]
 
+                    # Add to memory only if we're NOT creating validation and this pos is NOT validation
+                    if (not creating_validation) and (not is_validation):
+                        memory.append(label)
+
                 else:
+                    # Miss: label with Stockfish
                     label, info_list = label_board(engine, board)
                     state_tensor, policy_label, value_label, action_mask = label
 
-                    ranked_moves = list([info["pv"][0] for info in info_list if info.get("pv")])
+                    ranked_moves = [info["pv"][0] for info in info_list if info.get("pv")]
                     ranked_moves_uci = [m.uci() for m in ranked_moves]
 
-                    # compress policy to top-K (recommended)
                     flat = np.asarray(policy_label, dtype=np.float32).reshape(-1)
                     K = 32
                     top_idx = np.argpartition(-flat, K)[:K]
@@ -402,47 +435,62 @@ def worker_generate(worker_id: int, n_files: int, length_of_file: int, out_dir: 
                     if s > 0:
                         top_prob = top_prob / s
 
-                    cache_put(conn, key, float(value_label), ranked_moves_uci, top_idx, top_prob)
+                    # Insert and detect if it truly was "unique"
+                    inserted = cache_put(
+                        conn, key, float(value_label), ranked_moves_uci, top_idx, top_prob,
+                        validation=int(creating_validation)
+                    )
+
+                    # If creating validation: only keep it if we actually inserted it (unique)
+                    if creating_validation:
+                        if inserted:
+                            memory.append(label)
+                        # else: someone else inserted it first -> NOT unique -> skip
+                    else:
+                        # training mode: new misses are not validation, so keep
+                        memory.append(label)
+                        
 
                 ranked_moves_list = list(ranked_moves) if ranked_moves else []
                 candidates = ranked_moves_list + list(board.legal_moves)
                 action = select_move_least_visited_then_best(conn, board, candidates, policy_label)
-
-                memory.append(label)
-                if move_count % 10 == 0:
-                    print(f"[Worker {worker_id}] played: {action.uci()}, for the posistion: {board.fen()}")
                 board.push(action)
                 move_count += 1
                 
-
-            if len(memory) % 100 == 0:
-                print(f"[Worker {worker_id}] {(len(memory) * 100) / length_of_file:.1f}% done")
+            #if (game_counter - 1) % 10 == 0:
+                #print(f"[Worker {worker_id}] {((len(memory) + files_saved * length_of_file) * 100) / (length_of_file * n_files):.1f}% done")
             if len(memory) >= length_of_file:
                 files_saved += 1
                 out_path = os.path.join(out_dir, f"labeled_w{worker_id}_{files_saved}.pt")
                 torch.save(memory, out_path)
-                print(f"[Worker {worker_id}] Saved {out_path} ({len(memory)} samples)")
+                #print(f"[Worker {worker_id}] Saved {out_path} ({len(memory)} samples) | {((len(memory) + files_saved * length_of_file) * 100) / (length_of_file * n_files):.1f}% done")
                 memory = []
+                pbar.update(1)
 
     finally:
-        # flush leftovers
         if memory:
             files_saved += 1
             out_path = os.path.join(out_dir, f"labeled_w{worker_id}_{files_saved}.pt")
             torch.save(memory, out_path)
-            print(f"[Worker {worker_id}] Saved leftover {out_path} ({len(memory)} samples)")
+            #print(f"[Worker {worker_id}] Saved leftover {out_path} ({len(memory)} samples)")
+        pbar.close()
         engine.quit()
+
+def worker_entry(lock, *args):
+    _init_tqdm(lock)
+    worker_generate(*args)
 
 def parallel_data_gen(num_workers: int, files_per_worker: int, length_of_file: int,
                       out_dir: str, engine_path: str, db_path: str,
-                      stagger_seconds: float = 0.5):
+                      stagger_seconds: float = 0.5, creating_validation: bool = False):
     ctx = mp.get_context("spawn")
+    lock = ctx.RLock()
     procs = []
 
     for wid in range(num_workers):
         p = ctx.Process(
-            target=worker_generate,
-            args=(wid, files_per_worker, length_of_file, out_dir, engine_path, db_path),
+            target=worker_entry,
+            args=(lock, wid, files_per_worker, length_of_file, out_dir, engine_path, db_path, creating_validation),
             daemon=False
         )
         p.start()
@@ -455,13 +503,20 @@ def parallel_data_gen(num_workers: int, files_per_worker: int, length_of_file: i
     for p in procs:
         p.join()
 
+_TQDM_LOCK = None
+
+def _init_tqdm(lock):
+    global _TQDM_LOCK
+    _TQDM_LOCK = lock
+    tqdm.set_lock(lock)
+
 def main():
     mp.freeze_support()  # safe on Windows
     parallel_data_gen(
-        num_workers=9,          # start with #physical cores or slightly less
-        files_per_worker=100,     # each worker writes this many files
-        length_of_file=10000,    # samples per file (your length_of_file)
-        out_dir="Stockfish_data",
+        num_workers=10,          # start with #physical cores or slightly less
+        files_per_worker=20,     # each worker writes this many files
+        length_of_file=1000,    # samples per file (your length_of_file)
+        out_dir="Stockfish_test_data",
         engine_path=get_engine_path(),
         db_path="stockfish_label_cache.db",
         stagger_seconds=10

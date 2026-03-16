@@ -247,7 +247,7 @@ def main():
     HUMAN_COLOR = chess.WHITE
     BOT_COLOR = chess.BLACK
 
-    bot = StockFishBot(max_think_time_s=300)
+    bot = MCTSBot(max_think_time_s=300)
     bot.create_root(board)
 
     selected_sq = None
