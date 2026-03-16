@@ -4,6 +4,8 @@ stockfish/
 Stockfish_data/
 Stockfish_data_val/
 Stockfish_test_data/
+bin/
+obj/
 syzygy/
 __pycache__/
 Models/
@@ -15,3 +17,5 @@ Models/
 *.db
 *.txt
 *.csv
+*.onnx
+*.onnx.data

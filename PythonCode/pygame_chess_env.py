@@ -49,7 +49,7 @@ class MCTSBot:
     def __init__(self, max_think_time_s: float):
         args = {
             'C': 2,
-            'num_searches': 1600,
+            'num_searches': 200,
             'lr': 1e-4,
             'weight_decay': 1e-4,
             'res_blocks': 40,
@@ -59,7 +59,7 @@ class MCTSBot:
         # Your trained model
         model = AlphaZeroChess(num_resBlocks=args['res_blocks'], num_hidden=args['num_hidden'])
 
-        model.load_state_dict(torch.load("PretrainModel.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
+        model.load_state_dict(torch.load("CurBestPretrainModel1.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
         model.eval()
         self.mcts = MCTS(args=args, model=model)
         self.max_think_time_s = max_think_time_s
