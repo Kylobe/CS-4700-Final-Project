@@ -244,7 +244,8 @@ class MCTS:
         for child in self.root.children:
             child:Node
             action_probs[child.action] = child.visit_count
-        action_probs /= np.sum(action_probs)
+        s = np.sum(action_probs)
+        action_probs /= s
         return action_probs
 
 

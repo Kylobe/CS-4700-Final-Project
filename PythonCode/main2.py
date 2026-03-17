@@ -20,35 +20,38 @@ def run_worker(rank, model, args, return_queue):
 
 def main():
     mp.set_start_method("spawn", force=True)
-    load_model = False
+    load_model = True
     args = {
         'C': 2,
         'material_weight': 0.5,
-        'num_searches': 800,
+        'num_searches': 200,
         'num_iterations': 10,
         'num_self_play_iterations': 5,
         'epochs': 5,
-        'num_processes': 1,
-        'res_blocks': 12,
-        'num_hidden': 128,
+        'num_processes': 12,
+        'res_blocks': 40,
+        'num_hidden': 256,
         'batch_size': 128,
         'phase': 0,
-        'syzygy_path':"C:\chess_tb\syzygy",
+        'syzygy_path': None,
         'base-lr': 0.1,
-        'use_tables':False
+        'lr': 1e-4,
+        'use_tables':False,
+        "weight_decay": 1e-4
     }
 
     env = ChessEnv()
-    model = AlphaZeroChess(env, num_resBlocks=args['res_blocks'], num_hidden=128)
+    model = AlphaZeroChess(num_resBlocks=args['res_blocks'], num_hidden=args["num_hidden"])
     if load_model:
-        model.load_state_dict(torch.load("LatestAlphaChess.pt", map_location=torch.device('cpu')))
+        model.load_state_dict(torch.load("CurBestPretrainModel.pt", map_location=torch.device('cpu')))
     model.share_memory()
 
 
 
-    optimizer = optim.Adam(model.parameters(), lr=5e-3)
-    if load_model:
-        optimizer.load_state_dict(torch.load("LatestOptimizer.pt", map_location=torch.device('cpu')))
+    optimizer = optim.AdamW(model.parameters(), lr=args["lr"], weight_decay=args["weight_decay"])
+    #if load_model:
+        #opt_state = torch.load("CurBestOptim.pt", map_location="cpu", weights_only=False)
+        #optimizer.load_state_dict(opt_state)
     alpha = AlphaZero(model, optimizer, env, args)
     memory = deque(maxlen=50000)
     scheduler = CosineAnnealingLR(optimizer, T_max=50) 

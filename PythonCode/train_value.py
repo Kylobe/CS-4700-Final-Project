@@ -19,7 +19,10 @@ import json
 import os
 from data_stream import make_stream_loader
 from torch.optim.lr_scheduler import CosineAnnealingLR
-import math
+from stockfish_data_gen import parallel_data_gen, get_engine_path
+import multiprocessing as mp
+import shutil
+import os
 
 def analyze_value_distribution(samples):
     vals = np.array([v for (_, v) in samples])
@@ -65,7 +68,7 @@ def build_balanced_dataset(samples, total_size=50000):
         if not bucket:
             continue
         k = min(len(bucket), int(total_size * frac))
-        balanced.extend(random.sample(bucket, k))
+        balanced.extend(random.choices(bucket, k=k))
 
     random.shuffle(balanced)
     return balanced
@@ -506,7 +509,13 @@ def load_all_data(data_dir, max_len = 100000):
             return memory
     return memory
 
+def reset_lr(optim, lr):
+    for pg in optim.param_groups:
+        pg['lr'] = lr
+
 def main():
+    folder_name = "Stockfish_data"
+    validation_folder = "Stockfish_test_data"
     env = ChessEnv()
 
     config = {
@@ -515,68 +524,102 @@ def main():
         'res_blocks': 40,
         'num_hidden': 256,
         'batch_size': 64,
-        'epochs': 50
+        'epochs': 3
     }
-
     model = AlphaZeroChess(num_resBlocks=config['res_blocks'], num_hidden=config['num_hidden'])
     optimizer = optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
-    scheduler = CosineAnnealingLR(optimizer, T_max=50)
+    model.load_state_dict(torch.load("CurBestPretrainModel.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
+    opt_state = torch.load("CurBestOptim.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), weights_only=False)
+    optimizer.load_state_dict(opt_state)
+    reset_lr(optimizer, config['lr'])
     alpha = AlphaZero(model, optimizer, env, config)
+    NUM_WORKERS = 10
+    FILES_PER_WORKER = 700
+    LENGTH_OF_FILE = 1000
+    mill_pos_trained_on = 7_000_000
+    print("LR:", optimizer.param_groups[0]["lr"])
+    best_policy_loss = 2.22
+    best_value_loss = 0.6
+    while True:
+        val_data = load_all_data(validation_folder, max_len=200_000)
+        pre_policy_loss = compute_policy_validation_loss(model, val_data, config["batch_size"])
+        pre_value_loss = compute_value_validation_loss(model, val_data, config["batch_size"])
+        bad_epochs = 0
+        patience = 0
+        if best_value_loss > pre_value_loss and best_policy_loss > pre_policy_loss:
+            best_value_loss = pre_value_loss
+            best_policy_loss = pre_policy_loss
 
-    # ---- Streaming train loader (ALL 47GB) ----
-    stream_ds, train_loader = make_stream_loader(
-        root_dir="Stockfish_data",
-        batch_size=config["batch_size"],
-        num_workers=4,          # tune: 4/8/12 depending on CPU
-        shuffle_buffer=50_000,  # tune down if RAM spikes
-        seed=123,
-        pin_memory=(model.device.type == "cuda"),
-    )
+        ds, loader = make_stream_loader(
+            root_dir="C:\\Users\\Traedon Harris\\Documents\\GitHub\\CS-4700-Final-Project\\Stockfish_data",
+            batch_size=alpha.args["batch_size"],
+            num_workers=4,
+            shuffle_buffer=50_000,
+            seed=0,
+            pin_memory=True,
+            persistent_workers=False,
+            prefetch_factor=4
+        )
 
-    # ---- Small validation set in RAM (e.g., first N samples) ----
-    # Easiest: reuse your old loader but cap it
-    data = load_all_data("Stockfish_data_val", max_len=50_000) \
-        if os.path.isdir("Stockfish_data_val") else load_all_data("Stockfish_data", max_len=50_000)
+        print(f"Before Training The Total Validation Loss: {pre_policy_loss + pre_value_loss:.2f}, Policy Loss: {pre_policy_loss:.2f}, Value Loss: {pre_value_loss:.2f}")
+        print(f"Best Total Loss: {best_value_loss + best_policy_loss:0.2f}, Best Policy Loss: {best_policy_loss}, Best Value Loss: {best_value_loss}")
+        print("training (streaming)")
+        for epoch in range(config["epochs"]):
+            ds.set_epoch(epoch)
 
-    val_data = data
+            total_loss, policy_loss, value_loss = alpha.train_loader(loader)
 
-    best_policy_loss = compute_policy_validation_loss(model, val_data, config["batch_size"])
-    best_value_loss = compute_value_validation_loss(model, val_data, config["batch_size"])
-    bad_epochs = 0
-    patience = 1000
-    print(f"Before Training The Total Validation Loss: {best_policy_loss + best_value_loss}, Policy Loss: {best_policy_loss}, Value Loss: {best_value_loss}")
-    print("training (streaming)")
-    for epoch in range(config["epochs"]):
-        stream_ds.set_epoch(epoch)
+            policy_val_loss = compute_policy_validation_loss(model, val_data, config["batch_size"])
+            value_val_loss  = compute_value_validation_loss(model, val_data, config["batch_size"])
+            if best_value_loss > value_val_loss and best_policy_loss > policy_val_loss:
+                best_value_loss = value_val_loss
+                best_policy_loss = policy_val_loss
+                bad_epochs = 0
+                torch.save(model.state_dict(), "CurBestPretrainModel.pt")
+                torch.save(optimizer.state_dict(), "CurBestOptim.pt")
+            elif np.abs(best_value_loss - value_val_loss) > 0.005 or np.abs(best_policy_loss - policy_val_loss) > 0.01:
+                bad_epochs += 1
+            total_val_loss  = policy_val_loss + value_val_loss
 
-        total_loss, policy_loss, value_loss = alpha.train_loader(train_loader)
+            print(f"[Epoch {epoch+1}/{config['epochs']}] "
+                f"Train: total={total_loss:.2f} pol={policy_loss:.2f} val={value_loss:.2f} | "
+                f"Val: total={total_val_loss:.2f} pol={policy_val_loss:.2f} val={value_val_loss:.2f} | "
+                f"LR: {optimizer.param_groups[0]['lr']}")
+            if bad_epochs > patience:
+                print(f"Model Validition Loss Is Not Improving. Stopping Training.")
+                break
+            model.load_state_dict(torch.load("CurBestPretrainModel.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
+            opt_state = torch.load("CurBestOptim.pt", map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), weights_only=False)
+            optimizer.load_state_dict(opt_state)
+            reset_lr(optimizer, config['lr'])
+        mill_pos_trained_on += NUM_WORKERS * FILES_PER_WORKER * LENGTH_OF_FILE
+        print(f"Positions Trained On In Millions: {mill_pos_trained_on / 1_000_000}")
 
-        scheduler.step()
-        policy_val_loss = compute_policy_validation_loss(model, val_data, config["batch_size"])
-        value_val_loss  = compute_value_validation_loss(model, val_data, config["batch_size"])
-        if best_value_loss > value_val_loss:
-            best_value_loss = value_val_loss
-            torch.save(model.state_dict(), "CurBestPretrainModel.pt")
-            torch.save(optimizer.state_dict, "CurBestOptim.pt")
-        elif np.abs(best_value_loss - value_val_loss) > 0.005:
-            bad_epochs += 1
-        if best_policy_loss > policy_val_loss:
-            best_policy_loss = policy_val_loss
-        elif np.abs(best_policy_loss - policy_val_loss) > 0.01:
-            bad_epochs += 1
-        total_val_loss  = policy_val_loss + value_val_loss
+        try:
+            shutil.rmtree(folder_name)
+            print(f"Directory and all contents deleted: {folder_name}")
+        except OSError as e:  
+            print(f"Error: {folder_name} : {e.strerror}")
+        val_data = []
+        try:
+            os.makedirs(folder_name, exist_ok=True)
+            print(f"Directory recreated: {folder_name}")
+        except OSError as e:
+            print(f"Error: {folder_name} : {e.strerror}")
 
-        print(f"[Epoch {epoch+1}/{config['epochs']}] "
-              f"Train: total={total_loss:.2f} pol={policy_loss:.2f} val={value_loss:.2f} | "
-              f"Val: total={total_val_loss:.2f} pol={policy_val_loss:.2f} val={value_val_loss:.2f}")
-        if bad_epochs >= patience:
-            print(f"Model Validition Loss Is Not Improving. Stopping Training.")
-            break
-
-
+        parallel_data_gen(
+            num_workers=NUM_WORKERS,          # start with #physical cores or slightly less
+            files_per_worker=FILES_PER_WORKER,     # each worker writes this many files
+            length_of_file=LENGTH_OF_FILE,    # samples per file (your length_of_file)
+            out_dir=folder_name,
+            engine_path=get_engine_path(),
+            db_path="stockfish_label_cache.db",
+            stagger_seconds=10
+        )
 
 
 if __name__ == "__main__":
+    mp.freeze_support()
     main()
 
 

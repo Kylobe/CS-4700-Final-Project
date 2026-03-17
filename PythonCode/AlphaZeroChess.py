@@ -89,9 +89,13 @@ class AlphaZero:
             turn += 1
             if turn % 10 == 0:
                 print(f"Starting turn: {turn}")
-            action_probs = self.mcts.search(state, player)
+            action_probs = self.mcts.search(state)
+            flat = action_probs.reshape(-1).astype(np.float64)
+            s = flat.sum()
+            flat /= s
             memory.append((state, action_probs, player))
-            action = np.random.choice(self.env.num_moves, p=action_probs)
+            action_idx = np.random.choice(flat.size, p=flat)
+            action = np.unravel_index(action_idx, action_probs.shape)
             self.mcts.advance_root(action)
             state, done = self.env.step(action)
             if done:
