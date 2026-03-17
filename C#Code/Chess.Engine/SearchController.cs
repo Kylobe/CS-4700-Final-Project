@@ -9,8 +9,7 @@ public sealed class SearchController
 {
     private readonly MCTS _mcts;
     private readonly EngineGameState _state;
-
-    private Thread? _worker;
+    private List<Task>? _ponderTasks;
     private CancellationTokenSource? _cts;
 
     public SearchController(MCTS mcts, EngineGameState state)
@@ -50,86 +49,85 @@ public sealed class SearchController
     public void StartPondering()
     {
         Stop();
+
         (IPosition pos, Move lastMove) = _state.SnapshotPosition();
+
+        int requestedWorkers = Math.Max(1, Environment.ProcessorCount - 1);
+        int workerCount = Math.Min(requestedWorkers, Environment.ProcessorCount);
+        workerCount = Math.Max(1, workerCount);
+
         _cts = new CancellationTokenSource();
-        var token = _cts.Token;
+        _ponderTasks = new List<Task>();
 
-        _worker = new Thread(() =>
+        string rootFen = pos.FenNotation;
+        CancellationToken token = _cts.Token;
+
+        for (int i = 0; i < workerCount; i++)
         {
-            // Ponder loop: keep expanding until canceled
-            while (!token.IsCancellationRequested)
+            _ponderTasks.Add(Task.Run(() =>
             {
-                // rootGood = false here (we’re just building tree)
-                // If you have “rootGood” semantics tied to main line, you can keep it false.
-                _mcts.ExpandTree(pos);
-            }
-        })
-        {
-            IsBackground = true,
-            Name = "PonderThread"
-        };
+                IPosition localPos = GameFactory.Create(rootFen).Pos;
 
-        _worker.Start();
+                while (!token.IsCancellationRequested)
+                {
+                    _mcts.ExpandTree(localPos);
+                }
+            }, token));
+        }
     }
 
     public void Stop()
     {
-        if (_cts == null) return;
+        if (_cts == null)
+            return;
 
         try
         {
             _cts.Cancel();
-            _worker?.Join();
+
+            if (_ponderTasks is not null && _ponderTasks.Count > 0)
+            {
+                try
+                {
+                    Task.WaitAll(_ponderTasks.ToArray());
+                }
+                catch (AggregateException ex)
+                {
+                    foreach (Exception inner in ex.InnerExceptions)
+                    {
+                        if (inner is not OperationCanceledException)
+                        {
+                            Program.Log(inner.ToString());
+                        }
+                    }
+                }
+            }
         }
-        catch { /* ignore */ }
         finally
         {
             _cts.Dispose();
             _cts = null;
-            _worker = null;
+            _ponderTasks = null;
         }
     }
-
     public string ThinkAndPickBestMove(int thinkMs)
     {
         Stop();
+
         (IPosition pos, Move lastMove) = _state.SnapshotPosition();
-        HashKey posKey = pos.State.Key;
-        string originalFen = pos.FenNotation;
-        int earlyReturnMs = thinkMs / 5;
-        //_mcts.RepairRoot(pos);
 
-        // Ensure MCTS root matches current position
-        // You can optionally call CreateRoot(pos) explicitly if needed
-        // or adapt your MCTS to accept a “set root from position” method.
-        var sw = Stopwatch.StartNew();
-        bool stablePos = false;
-        while (sw.ElapsedMilliseconds < thinkMs && !stablePos)
+        if (_mcts.root == null || _mcts.root.children.Count == 0)
         {
-            // IMPORTANT: ExpandTree must not leave pos mutated after returning.
-            // Either ExpandTree must undo internally, or you must pass a fresh pos each call.
-            for (int _ = 0; _ < 10; _++)
-            {
-                _mcts.ExpandTree(pos);
-            }
-            if (sw.ElapsedMilliseconds < earlyReturnMs)
-            {
-                stablePos = _mcts.PosIsStable();
-            }
+            _mcts.CreateRoot(pos);
         }
 
-        List<(int index, int moveCount)> moveProbs = _mcts.GetProbabilityDistribution();
+        int requestedWorkers = Math.Max(1, Environment.ProcessorCount - 1);
+        _mcts.SearchParallel(thinkMs, requestedWorkers, pos);
 
-        // Choose best move from probs: argmax over legal moves
-        // You need a mapping from flat policy index -> Move.
-        // Typically: iterate legalIndices, pick max probs[idx], decode action -> Move.
-        if (pos.FenNotation != originalFen)
-        {
-            pos = GameFactory.Create(originalFen).Pos;
-        }
         Move bestMove = _mcts.GetTopMove(pos);
         _state.ApplyEngineMove(bestMove);
         OnPositionChanged();
+
         return ChessEnv.GetUciFromMove(bestMove);
     }
 }

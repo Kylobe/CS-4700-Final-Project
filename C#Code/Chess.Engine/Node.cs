@@ -1,205 +1,264 @@
-
 using System;
+using System.Collections.Generic;
+using System.Threading;
 using Rudzoft.ChessLib;
 using Rudzoft.ChessLib.Types;
-using Rudzoft.ChessLib.Enums;     // PieceTypes lives here in ChessLib
-using Rudzoft.ChessLib.Extensions; // BitBoards.PopLsb is referenced from Position code paths
+using Rudzoft.ChessLib.Enums;
 using Rudzoft.ChessLib.MoveGeneration;
-using System.IO.Pipelines;
-using Chess.Engine;
-using Microsoft.ML.OnnxRuntime;
-using System.Security.Principal;
-using System.Net.Http.Headers;
-using Rudzoft.ChessLib.Factories;
 
 public class Node
 {
+    private readonly object _expandLock = new object();
+    private readonly object _statsLock = new object();
+
+    private List<Node> _children = new List<Node>();
+
+    // 0 = not expanded, 1 = expanding, 2 = expanded
+    private int _expandState = 0;
+
+    private int _visitCount = 0;
+    private float _score = 0f;
+
+    // optional worker reservation / virtual-loss bookkeeping later
+    public int inFly = 0;
+
     public Node? parent { get; private set; }
     public Move action { get; private set; }
-    public List<Node> children { get; }
-    public bool terminal { get; set; }
-    public int visitCount { get; private set; }
-    public float score = 0;
-    public int winVal { get; set; }
-    private float prior;
-    public Player turn;
-    public HashKey posKey;
-    public Node(bool _terminal, int _winVal, float _prior, Player _turn, HashKey _posKey)
-    {
-        terminal = _terminal;
-        winVal = _winVal;
-        prior = _prior;
-        turn  = _turn;
-        posKey = _posKey;
+    public bool terminal { get; private set; }
+    public int winVal { get; private set; }
+    private readonly float prior;
+    public Player turn { get; }
 
-        children = new List<Node>();
+    public Node(bool terminal, int winVal, float prior, Player turn)
+    {
+        this.terminal = terminal;
+        this.winVal = winVal;
+        this.prior = prior;
+        this.turn = turn;
     }
-    public void SetParent(Node newParent)
+
+    public void SetParent(Node? newParent)
     {
         parent = newParent;
     }
+
     public void SetAction(Move newAction)
     {
         action = newAction;
     }
+
+    // Safe snapshot for iteration
+    public List<Node> children
+    {
+        get
+        {
+            return Volatile.Read(ref _children);
+        }
+    }
+
+    public int visitCount => Volatile.Read(ref _visitCount);
+
+    public float score
+    {
+        get
+        {
+            lock (_statsLock)
+            {
+                return _score;
+            }
+        }
+    }
+
     public bool IsExpanded()
     {
-        return children.Count > 0;
+        return Volatile.Read(ref _expandState) == 2;
     }
-    public static void BackPropTerminal(Node node)
-    {
-        bool allChildrenTerminal = true;
-        bool allChildrenWinning = true;
-        foreach (Node child in node.children)
-        {
-            if (!child.terminal)
-            {
-                allChildrenTerminal = false;
-                allChildrenWinning = false;
-                break;
-            }
 
-            else if (child.winVal < 1)
-            {
-                allChildrenWinning = false;
-            }
-        }
+    public bool IsExpanding()
+    {
+        return Volatile.Read(ref _expandState) == 1;
+    }
 
-        if (allChildrenWinning)
+    public bool TryBeginExpand()
+    {
+        return Interlocked.CompareExchange(ref _expandState, 1, 0) == 0;
+    }
+
+    public void MarkExpanded(List<Node> newChildren)
+    {
+        Volatile.Write(ref _children, newChildren);
+        Volatile.Write(ref _expandState, 2);
+    }
+
+    public void CancelExpand()
+    {
+        Volatile.Write(ref _expandState, 0);
+    }
+    public void IncrementVisitCount()
+    {
+        Interlocked.Increment(ref _visitCount);
+    }
+
+    public void SetTerminalResult(int newWinVal)
+    {
+        lock (_statsLock)
         {
-            node.winVal = -1;
-            node.terminal = true;
-            if (!(node.parent is null))
-            {
-                node.parent.winVal = 1;
-                node.parent.terminal = true;
-                if (!(node.parent.parent is null))
-                {
-                    BackPropTerminal(node.parent.parent);
-                }
-            }
-        }
-        else if (allChildrenTerminal)
-        {
-            node.winVal = 0;
-            node.terminal = true;
-            if (! (node.parent is null))
-            {
-                BackPropTerminal(node.parent);
-            }
+            terminal = true;
+            winVal = newWinVal;
         }
     }
-    /*
-    public void AddChild(float prior, Move action, bool terminal, int winVal, Player sideTomMove)
+
+    public float GetUcb(float c, int parentVisitCount)
     {
-        Node newNode = new Node(terminal, winVal, prior, sideTomMove);
-        newNode.SetAction(action);
-        children.Add(newNode);
-    }
-    */
-    public void Expand(float[] policy, IPosition pos)
-    {
-        bool oneDrawnChild = false;
-        var legalMoves = pos.GenerateMoves();
-        string originalFen = pos.FenNotation;
-        foreach (Move move in legalMoves)
-        {
-            (int p, int r, int c) = ChessEnv.EncodeAction(move, pos.SideToMove);
-            int flatIdx = ChessEnv.PlaneRowColToFlatIdx(p, r, c);
-            float newPrior = policy[flatIdx];
-            try
-            {
-                pos.MakeMove(move, new State());
-            }
-            catch (Exception ex)
-            {
-                Program.Log("FATAL in Node.Expand loop:");
-                Program.Log(ex.ToString());
-                Program.Log($"Tried to make the move: {move.ToString()}; in the position: {originalFen}");
-            }
-            bool newTerminal = false;
-            int newWinVal = 0;
-            if (pos.IsMate)
-            {
-                newTerminal = true;
-                newWinVal = -1;
-                terminal = true;
-                winVal = 1;
-                if (!(parent is null))
-                {
-                    BackPropTerminal(parent);
-                }
-            }
-            else if (pos.IsDraw(pos.Ply))
-            {
-                newTerminal = true;
-                newWinVal = 0;
-                oneDrawnChild = true;
-            }
-            Node newNode = new Node(newTerminal, newWinVal, newPrior, pos.SideToMove, pos.State.Key);
-            newNode.SetParent(this);
-            newNode.SetAction(move);
-            children.Add(newNode);
-            pos.TakeMove(move);
-            string currentFen = pos.FenNotation;
-            if (currentFen != originalFen)
-            {
-                Program.Log("FATAL in Node.Expand loop:");
-                Program.Log($"The move: {move.ToString()}, in the position: {originalFen}, resulted in: {currentFen}");
-            }
-        }
-        if (oneDrawnChild && !terminal)
-        {
-            BackPropTerminal(this);
-        }
-    }
-    public float GetUcb(float c)
-    {
+        int curVisitCount = visitCount;
+
         float qVal = 0.5f;
-        if (terminal)
+        bool isTerminal;
+        int curWinVal;
+
+        lock (_statsLock)
         {
-            if (winVal == 1)
+            isTerminal = terminal;
+            curWinVal = winVal;
+
+            if (isTerminal)
             {
-                qVal = 0f;
+                if (curWinVal == 1)
+                    qVal = 0f;
+                else if (curWinVal == -1)
+                    qVal = 1f;
             }
-            else if (winVal == -1)
+            else if (curVisitCount > 0)
             {
-                qVal = 1f;
+                float ratio = _score / curVisitCount;
+                qVal = 1f - ((ratio + 1f) / 2f);
             }
         }
-        else
-        {
-            if (visitCount > 0)
-            {
-                float ratio = score / visitCount;
-                qVal = 1 - ((ratio + 1) / 2);
-            }
-        }
-        float u = c * ((float)Math.Sqrt(visitCount + 1) / (visitCount + 1)) * prior;
+
+        float u = c * prior * ((float)Math.Sqrt(parentVisitCount + 1) / (curVisitCount + 1));
         return qVal + u;
     }
-    public Node Select(float c)
+
+    public Node Select(float c, float virtualLoss)
     {
-        Node bestChild = children[0];
-        float bestUcb = bestChild.GetUcb(c);
-        foreach (Node child in children)
+        var snapshot = children;
+        if (snapshot.Count == 0)
+            throw new InvalidOperationException("Cannot select from a node with no children.");
+
+        int parentVisits = Math.Max(1, visitCount);
+
+        Node bestChild = snapshot[0];
+        float bestUcb = bestChild.GetUcb(c, parentVisits);
+
+        for (int i = 1; i < snapshot.Count; i++)
         {
-            float curUcb = child.GetUcb(c);
+            Node child = snapshot[i];
+            float curUcb = child.GetUcb(c, parentVisits);
             if (curUcb > bestUcb)
             {
                 bestUcb = curUcb;
                 bestChild = child;
             }
         }
+        lock(bestChild._statsLock)
+        {
+            bestChild._score -= virtualLoss;
+        }
+        bestChild.IncrementVisitCount();
         return bestChild;
     }
-    public void BackPropScore(float val)
+
+    public void BackPropScore(float val, float virtualLoss)
     {
-        score += val;
-        visitCount += 1;
-        if (!(parent is null))
+        Node? cur = this;
+        float curVal = val;
+
+        while (cur is not null)
         {
-            parent.BackPropScore(-val);
+            lock (cur._statsLock)
+            {
+                cur._score += curVal + virtualLoss;
+            }
+
+
+            curVal = -curVal;
+            cur = cur.parent;
         }
+    }
+
+    public bool TryExpand(float[] policy, IPosition pos)
+    {
+        if (IsExpanded())
+            return false;
+
+        if (!TryBeginExpand())
+            return false;
+
+        try
+        {
+            List<Node> newChildren = BuildChildren(policy, pos);
+            MarkExpanded(newChildren);
+            return true;
+        }
+        catch
+        {
+            CancelExpand();
+            throw;
+        }
+    }
+
+    private List<Node> BuildChildren(float[] policy, IPosition pos)
+    {
+        string originalFen = pos.FenNotation;
+        List<Node> newChildren = new List<Node>();
+
+        var legalMoves = pos.GenerateMoves();
+        foreach (Move move in legalMoves)
+        {
+            (int p, int r, int c) = ChessEnv.EncodeAction(move, pos.SideToMove);
+            int flatIdx = ChessEnv.PlaneRowColToFlatIdx(p, r, c);
+            float newPrior = policy[flatIdx];
+
+            try
+            {
+                pos.MakeMove(move, new State());
+            }
+            catch (Exception ex)
+            {
+                Program.Log("FATAL in Node.BuildChildren loop:");
+                Program.Log(ex.ToString());
+                Program.Log($"Tried to make move {move} in {originalFen}");
+                throw;
+            }
+
+            bool newTerminal = false;
+            int newWinVal = 0;
+
+            if (pos.IsMate)
+            {
+                newTerminal = true;
+                newWinVal = -1;
+            }
+            else if (pos.IsDraw(pos.Ply))
+            {
+                newTerminal = true;
+                newWinVal = 0;
+            }
+
+            Node newNode = new Node(newTerminal, newWinVal, newPrior, pos.SideToMove);
+            newNode.SetParent(this);
+            newNode.SetAction(move);
+            newChildren.Add(newNode);
+
+            pos.TakeMove(move);
+
+            if (pos.FenNotation != originalFen)
+            {
+                Program.Log("FATAL in Node.BuildChildren loop:");
+                Program.Log($"Move {move} in {originalFen} resulted in corrupted position {pos.FenNotation}");
+                throw new InvalidOperationException("Position corruption detected during expansion.");
+            }
+        }
+        return newChildren;
     }
 }

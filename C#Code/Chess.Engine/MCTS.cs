@@ -29,6 +29,7 @@ public class MCTS
     {
         bool terminal = false;
         int winVal = 0;
+
         if (pos.IsMate)
         {
             terminal = true;
@@ -38,20 +39,28 @@ public class MCTS
         {
             terminal = true;
         }
-        root = new Node(terminal, winVal, 0f, pos.SideToMove, pos.State.Key);
-        List<int> legalIndices;
-        float[] mask = ChessEnv.CreatePlaneActionMask(pos, out legalIndices);
-        float[,,] state = ChessEnv.EncodeBoard(pos);
-        ModelOutput output = model.Invoke(state);
-        float[] policy = output.PolicyLogits;
-        float[] masked = Algorithms.MultiplySIMD(policy, mask);
-        float sum = Algorithms.SumSIMD(masked);
-        if (sum > 0f)
+
+        root = new Node(terminal, winVal, 0f, pos.SideToMove);
+
+        if (!terminal)
         {
-            float inv = 1f / sum;
-            Algorithms.MultiplyScalarInPlaceSIMD(masked, inv);
+            List<int> legalIndices;
+            float[] mask = ChessEnv.CreatePlaneActionMask(pos, out legalIndices);
+            float[,,] state = ChessEnv.EncodeBoard(pos);
+            ModelOutput output = model.Invoke(state);
+            float[] policy = output.PolicyLogits;
+            float[] masked = Algorithms.MultiplySIMD(policy, mask);
+            float sum = Algorithms.SumSIMD(masked);
+
+            if (sum > 0f)
+            {
+                float inv = 1f / sum;
+                Algorithms.MultiplyScalarInPlaceSIMD(masked, inv);
+            }
+
+            root.TryExpand(masked, pos);
         }
-        root.Expand(masked, pos);
+
         Program.Log("Recreating Root!");
     }
     public bool AdvanceRoot(Move action)
@@ -72,76 +81,64 @@ public class MCTS
         Program.Log($"Move: {action} not found among root.");
         return false;
     }
-    public void RepairRoot(IPosition pos)
-    {
-        if (root is null)
-        {
-            CreateRoot(pos);
-            return;
-        }
-        if (root.posKey != pos.State.Key)
-        {
-            foreach (Node child in root.children)
-            {
-                if (child.posKey == pos.State.Key)
-                {
-                    root = child;
-                    root.SetParent(null);
-                    return;
-                }
-            }
-            Program.Log("Unable to repair root. Rebuilding tree.");
-            CreateRoot(pos);
-        }
-    }
     public void ExpandTree(IPosition pos)
     {
-        string originalFen = pos.FenNotation;
-        HashKey orginalKey = pos.State.Key;
+        float virtualLoss = 1f;
         if (root is null)
         {
             CreateRoot(pos);
         }
-        Node curNode = root;
+
+        Node curNode = root!;
         List<Move> movesFromRoot = new List<Move>();
+
         while (curNode.IsExpanded())
         {
-            curNode = curNode.Select(exploreCo);
+            var snapshot = curNode.children;
+            if (snapshot.Count == 0)
+                break;
+
+            curNode = curNode.Select(exploreCo, virtualLoss);
             pos.MakeMove(curNode.action, new State());
             movesFromRoot.Add(curNode.action);
         }
-        float value = curNode.winVal;
+
+        float value;
         bool terminated = curNode.terminal;
-        if (!terminated)
+
+        if (terminated)
+        {
+            value = curNode.winVal;
+        }
+        else
         {
             List<int> legalIndices;
             float[] mask = ChessEnv.CreatePlaneActionMask(pos, out legalIndices);
             float[,,] state = ChessEnv.EncodeBoard(pos);
             ModelOutput output = model.Invoke(state);
+
             float[] policy = output.PolicyLogits;
             value = output.Value;
+
             float[] masked = Algorithms.MultiplySIMD(policy, mask);
             float sum = Algorithms.SumSIMD(masked);
+
             if (sum > 0f)
             {
                 float inv = 1f / sum;
                 Algorithms.MultiplyScalarInPlaceSIMD(masked, inv);
             }
-            curNode.Expand(masked, pos);
+
+            curNode.TryExpand(masked, pos);
         }
-        curNode.BackPropScore(value);
+
+        curNode.BackPropScore(value, virtualLoss);
+
         for (int i = movesFromRoot.Count - 1; i >= 0; i--)
         {
-            Move move = movesFromRoot[i];
-            pos.TakeMove(move);
-        }
-        if (pos.FenNotation != originalFen)
-        {
-            Program.Log("Expand Corrupted Position. Resetting Position");
-            pos = GameFactory.Create(originalFen).Pos;
+            pos.TakeMove(movesFromRoot[i]);
         }
     }
-
     public bool PosIsStable()
     {
         if (root is null || root.children.Count == 0)
@@ -220,5 +217,50 @@ public class MCTS
             visitCounts.Add((flatIdx, child.visitCount));
         }
         return visitCounts;
+    }
+    public void SearchParallel(int thinkMs, int requestedWorkers, IPosition rootPos)
+    {
+        if (root is null)
+        {
+            CreateRoot(rootPos);
+        }
+
+        int workerCount = Math.Min(requestedWorkers, Environment.ProcessorCount);
+        workerCount = Math.Max(1, workerCount);
+
+        using CancellationTokenSource cts = new CancellationTokenSource();
+        cts.CancelAfter(thinkMs);
+
+        List<Task> tasks = new List<Task>();
+
+        string rootFen = rootPos.FenNotation;
+
+        for (int i = 0; i < workerCount; i++)
+        {
+            tasks.Add(Task.Run(() =>
+            {
+                IPosition localPos = GameFactory.Create(rootFen).Pos;
+
+                while (!cts.Token.IsCancellationRequested)
+                {
+                    ExpandTree(localPos);
+                }
+            }, cts.Token));
+        }
+
+        try
+        {
+            Task.WaitAll(tasks.ToArray());
+        }
+        catch (AggregateException ex)
+        {
+            foreach (Exception inner in ex.InnerExceptions)
+            {
+                if (inner is not OperationCanceledException)
+                {
+                    Program.Log(inner.ToString());
+                }
+            }
+        }
     }
 }
