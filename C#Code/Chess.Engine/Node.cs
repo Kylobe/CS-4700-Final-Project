@@ -9,13 +9,14 @@ using Rudzoft.ChessLib.MoveGeneration;
 public class Node
 {
     private readonly object _expandLock = new object();
-    private readonly object _statsLock = new object();
+    public readonly object _statsLock = new object();
 
     private List<Node> _children = new List<Node>();
 
     // 0 = not expanded, 1 = expanding, 2 = expanded
     private int _expandState = 0;
-
+    // 0 = at least one child not expanding, 1 = all children expanding
+    private int _childExpandState = 0;
     private int _visitCount = 0;
     private float _score = 0f;
 
@@ -88,15 +89,41 @@ public class Node
     {
         Volatile.Write(ref _children, newChildren);
         Volatile.Write(ref _expandState, 2);
+        parent?.MarkOneChildDone();
     }
 
     public void CancelExpand()
     {
         Volatile.Write(ref _expandState, 0);
+        parent?.MarkOneChildDone();
+    }
+
+    public bool AllChildExpanding()
+    {
+        return Volatile.Read(ref _childExpandState) == 1;
+    }
+    public void MarkAllChildrenExpanding()
+    {
+        Volatile.Write(ref _childExpandState, 1);
+    }
+    public void MarkOneChildDone()
+    {
+        Volatile.Write(ref _childExpandState, 0);
     }
     public void IncrementVisitCount()
     {
         Interlocked.Increment(ref _visitCount);
+    }
+    public void DecrementVisitCount()
+    {
+        Interlocked.Decrement(ref _visitCount);
+    }
+    public void UndoVirtualLoss(float virtualLoss)
+    {
+        lock (_statsLock)
+        {
+            _score -= virtualLoss;
+        }
     }
 
     public void SetTerminalResult(int newWinVal)
@@ -139,7 +166,7 @@ public class Node
         return qVal + u;
     }
 
-    public Node Select(float c, float virtualLoss)
+    public Node? Select(float c, float virtualLoss)
     {
         var snapshot = children;
         if (snapshot.Count == 0)
@@ -147,22 +174,31 @@ public class Node
 
         int parentVisits = Math.Max(1, visitCount);
 
-        Node bestChild = snapshot[0];
-        float bestUcb = bestChild.GetUcb(c, parentVisits);
+        Node? bestChild = null;
+        float bestUcb = 0;
 
-        for (int i = 1; i < snapshot.Count; i++)
+        for (int i = 0; i < snapshot.Count; i++)
         {
             Node child = snapshot[i];
             float curUcb = child.GetUcb(c, parentVisits);
-            if (curUcb > bestUcb)
+            if (!child.IsExpanding() && !child.AllChildExpanding())
             {
-                bestUcb = curUcb;
-                bestChild = child;
+                if (bestChild is null || curUcb > bestUcb)
+                {
+                    bestUcb = curUcb;
+                    bestChild = child;
+                }
             }
         }
+        if (bestChild is null)
+        {
+            MarkAllChildrenExpanding();
+            return null;
+        }
+        MarkOneChildDone();
         lock(bestChild._statsLock)
         {
-            bestChild._score -= virtualLoss;
+            bestChild._score += virtualLoss;
         }
         bestChild.IncrementVisitCount();
         return bestChild;
@@ -177,16 +213,20 @@ public class Node
         {
             lock (cur._statsLock)
             {
-                cur._score += curVal + virtualLoss;
+                cur._score += curVal - virtualLoss;
             }
 
 
             curVal = -curVal;
             cur = cur.parent;
+            if (cur is not null)
+            {
+                cur.MarkOneChildDone();
+            }
         }
     }
 
-    public bool TryExpand(float[] policy, IPosition pos)
+    public bool TryExpand(float[] policy, IReadOnlyList<Move> legalMoves)
     {
         if (IsExpanded())
             return false;
@@ -196,7 +236,7 @@ public class Node
 
         try
         {
-            List<Node> newChildren = BuildChildren(policy, pos);
+            List<Node> newChildren = BuildChildren(policy, legalMoves);
             MarkExpanded(newChildren);
             return true;
         }
@@ -207,58 +247,38 @@ public class Node
         }
     }
 
-    private List<Node> BuildChildren(float[] policy, IPosition pos)
+    private List<Node> BuildChildren(float[] policy, IReadOnlyList<Move> legalMoves)
     {
-        string originalFen = pos.FenNotation;
         List<Node> newChildren = new List<Node>();
+        Player nextTurn = turn == Player.White ? Player.Black : Player.White;
 
-        var legalMoves = pos.GenerateMoves();
         foreach (Move move in legalMoves)
         {
-            (int p, int r, int c) = ChessEnv.EncodeAction(move, pos.SideToMove);
+            (int p, int r, int c) = ChessEnv.EncodeAction(move, turn);
             int flatIdx = ChessEnv.PlaneRowColToFlatIdx(p, r, c);
             float newPrior = policy[flatIdx];
 
-            try
-            {
-                pos.MakeMove(move, new State());
-            }
-            catch (Exception ex)
-            {
-                Program.Log("FATAL in Node.BuildChildren loop:");
-                Program.Log(ex.ToString());
-                Program.Log($"Tried to make move {move} in {originalFen}");
-                throw;
-            }
-
-            bool newTerminal = false;
-            int newWinVal = 0;
-
-            if (pos.IsMate)
-            {
-                newTerminal = true;
-                newWinVal = -1;
-            }
-            else if (pos.IsDraw(pos.Ply))
-            {
-                newTerminal = true;
-                newWinVal = 0;
-            }
-
-            Node newNode = new Node(newTerminal, newWinVal, newPrior, pos.SideToMove);
+            Node newNode = new Node(false, 0, newPrior, nextTurn);
             newNode.SetParent(this);
             newNode.SetAction(move);
             newChildren.Add(newNode);
-
-            pos.TakeMove(move);
-
-            if (pos.FenNotation != originalFen)
-            {
-                Program.Log("FATAL in Node.BuildChildren loop:");
-                Program.Log($"Move {move} in {originalFen} resulted in corrupted position {pos.FenNotation}");
-                throw new InvalidOperationException("Position corruption detected during expansion.");
-            }
         }
         return newChildren;
+    }
+    public void FinishExpand(float[] policy, IReadOnlyList<Move> legalMoves)
+    {
+        if (!IsExpanding())
+            return;
+
+        try
+        {
+            List<Node> newChildren = BuildChildren(policy, legalMoves);
+            MarkExpanded(newChildren);
+        }
+        catch
+        {
+            CancelExpand();
+            throw;
+        }
     }
 }

@@ -441,6 +441,19 @@ public static class ChessEnv
 
         return mask;
     }
+    public static float[] CreatePlaneActionMask(Player turn, IReadOnlyList<Move> legalMoves)
+    {
+        var mask = new float[POLICY_PLANES * 8 * 8];
+
+        foreach (Move move in legalMoves)
+        {
+            var (p, r, c) = EncodeAction(move, turn);
+            int flatIdx = PlaneRowColToFlatIdx(p, r, c);
+            mask[flatIdx] = 1f;
+        }
+
+        return mask;
+    }
 
     // -----------------------------
     // Internals

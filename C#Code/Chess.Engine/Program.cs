@@ -35,6 +35,7 @@ public static class Program
                 "policy_logits",
                 "value"
             );
+            Log($"Using ONNX execution provider: {model.ExecutionProvider}");
 
             var mcts = new MCTS(model, _exploreCo: 1.25f);
             var engine = new UciEngine(mcts, ourName: "TraedonEngine");

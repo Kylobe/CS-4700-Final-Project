@@ -47,7 +47,7 @@ public static class TimeManager
     public static int ComputeThinkMs(GoParams go, Rudzoft.ChessLib.Types.Player sideToMove)
     {
         const int minThinkMs = 10;       // don’t do 0ms searches
-        const int maxThinkMs = 30_000;   // clamp so you don’t burn forever accidentally
+        const int maxThinkMs = 600_000;   // clamp so you don’t burn forever accidentally
 
         if (go.MoveTimeMs.HasValue)
             return Math.Clamp((int)(go.MoveTimeMs.Value * 0.05f), minThinkMs, maxThinkMs);

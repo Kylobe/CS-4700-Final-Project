@@ -49,9 +49,9 @@ public sealed class SearchController
     public void StartPondering()
     {
         Stop();
+        _mcts.StartBatching();
 
         (IPosition pos, Move lastMove) = _state.SnapshotPosition();
-
         int requestedWorkers = Math.Max(1, Environment.ProcessorCount - 1);
         int workerCount = Math.Min(requestedWorkers, Environment.ProcessorCount);
         workerCount = Math.Max(1, workerCount);
@@ -79,7 +79,10 @@ public sealed class SearchController
     public void Stop()
     {
         if (_cts == null)
+        {
+            _mcts.StopBatching();
             return;
+        }
 
         try
         {
@@ -108,11 +111,13 @@ public sealed class SearchController
             _cts.Dispose();
             _cts = null;
             _ponderTasks = null;
+            _mcts.StopBatching();
         }
     }
     public string ThinkAndPickBestMove(int thinkMs)
     {
         Stop();
+        _mcts.StartBatching();
 
         (IPosition pos, Move lastMove) = _state.SnapshotPosition();
 
@@ -131,3 +136,8 @@ public sealed class SearchController
         return ChessEnv.GetUciFromMove(bestMove);
     }
 }
+
+
+
+
+

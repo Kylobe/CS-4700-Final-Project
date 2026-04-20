@@ -49,10 +49,10 @@ def main():
     )
 
     # Load weights onto CPU (cleanest for export)
-    state = torch.load("CurBestPretrainModel.pt", map_location="cpu")
+    state = torch.load("FiftyMillionPos.pt", map_location="cpu")
     model.load_state_dict(state)
 
-    export_onnx(model, "chess_model.onnx")
+    export_onnx(model, "fifty_million_chess_model.onnx")
 
 
 if __name__ == "__main__":
