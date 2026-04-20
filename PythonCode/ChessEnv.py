@@ -1,21 +1,17 @@
-import gymnasium as gym
-from gymnasium import spaces
+
 import numpy as np
 import chess
 import torch
-import chess.engine
 import random
 from legal_uci import generate_move_dictionary
 
-class ChessEnv(gym.Env):
+class ChessEnv:
     move_to_encoding = generate_move_dictionary()
     encoding_to_move = {encoding: move for move, encoding in move_to_encoding.items() if move.promotion != chess.QUEEN}
     def __init__(self):
         self.board = chess.Board()
-        self.observation_space = spaces.Box(low=0, high=1, shape=(8, 8, 17), dtype=np.float32)
         
         self.num_moves = len(self.move_to_encoding)
-        self.action_space = spaces.Discrete(self.num_moves)
         self.piece_vals = {
             chess.QUEEN: 9,
             chess.ROOK: 5,

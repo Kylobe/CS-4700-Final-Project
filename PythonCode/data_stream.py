@@ -205,6 +205,7 @@ def make_stream_loader(
     pin_memory: bool = True,       # if using GPU
     persistent_workers: bool = True,
     prefetch_factor: int = 4,
+    drop_errors: bool = False,
 ) -> Tuple[PtShardStream, DataLoader]:
     ds = PtShardStream(
         root_dir=root_dir,
@@ -213,7 +214,7 @@ def make_stream_loader(
         shuffle_files_each_epoch=True,
         shuffle_buffer=shuffle_buffer,
         map_location="cpu",
-        drop_errors=False,
+        drop_errors=drop_errors,
     )
 
     loader = DataLoader(

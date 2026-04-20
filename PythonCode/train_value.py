@@ -138,18 +138,17 @@ def compute_policy_validation_loss(model, val_samples, batch_size=128):
             # Stack states -> shape: [B, C, 8, 8]
             states = torch.stack(states).float().to(model.device)
 
-            # Convert policy targets -> shape: [B, num_moves]
-            policy_targets = torch.tensor(
-                np.array(policy_targets, dtype=np.float32),
-                dtype=torch.float32,
-                device=model.device
-            )
+            # Stack policy targets and masks directly so mixed tensor/numpy inputs
+            # from saved .pt shards remain valid.
+            policy_targets = torch.stack([
+                torch.as_tensor(target, dtype=torch.float32)
+                for target in policy_targets
+            ]).to(model.device)
 
-            action_mask = torch.tensor(
-                np.array(action_mask),
-                dtype=torch.float32,
-                device=model.device
-            )
+            action_mask = torch.stack([
+                torch.as_tensor(mask, dtype=torch.float32)
+                for mask in action_mask
+            ]).to(model.device)
 
             # Forward pass
             out_policy, _ = model(states)
@@ -521,7 +520,7 @@ def main():
     config = {
         'lr': 1e-4,
         'weight_decay': 1e-4,
-        'res_blocks': 40,
+        'res_blocks': 20,
         'num_hidden': 256,
         'batch_size': 64,
         'epochs': 3
