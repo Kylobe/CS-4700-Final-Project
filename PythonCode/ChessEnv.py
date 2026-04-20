@@ -2,7 +2,6 @@
 import numpy as np
 import chess
 import torch
-import chess.engine
 import random
 from legal_uci import generate_move_dictionary
 

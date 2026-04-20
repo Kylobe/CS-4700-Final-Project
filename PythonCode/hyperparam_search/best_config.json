@@ -1,0 +1,20 @@
+{
+  "trial_index": 13,
+  "score": 2.7618984553376733,
+  "policy_loss": 2.6285120136846745,
+  "value_loss": 0.1333864416529987,
+  "train_loss": 2.7813243037462234,
+  "train_policy_loss": 2.6497447311878206,
+  "train_value_loss": 0.13157956479117275,
+  "best_epoch": 4,
+  "epochs_ran": 4,
+  "elapsed_seconds": 603.1294567,
+  "config": {
+    "lr": 0.0001,
+    "weight_decay": 0.0001,
+    "res_blocks": 30,
+    "num_hidden": 384,
+    "batch_size": 128,
+    "epochs": 4
+  }
+}
