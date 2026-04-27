@@ -11,7 +11,7 @@ from torch import optim
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from AlphaZeroChess import AlphaZeroChess
+from ChessNet import ChessNet
 from ChessEnv import ChessEnv
 from stockfish_data_gen import count_db_samples, open_and_init_db, unpack_sparse_policy
 
@@ -214,7 +214,7 @@ def main():
         pin_memory=torch.cuda.is_available(),
     )
 
-    model = AlphaZeroChess(
+    model = ChessNet(
         num_resBlocks=args.num_res_blocks,
         num_hidden=args.num_hidden,
     )

@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from torch import optim
 
-from AlphaZeroChess import AlphaZero, AlphaZeroChess
+from ChessNet import ChessNet, ChessNetTrainer
 from ChessEnv import ChessEnv
 from data_stream import make_stream_loader
 from train_value import (
@@ -106,8 +106,8 @@ def build_loader(root_dir: str, batch_size: int, seed: int, num_workers: int):
     )
 
 
-def train_loader_limited(alpha: AlphaZero, loader, max_batches: Optional[int]) -> Tuple[float, float, float]:
-    alpha.model.train()
+def train_loader_limited(trainer: ChessNetTrainer, loader, max_batches: Optional[int]) -> Tuple[float, float, float]:
+    trainer.model.train()
     total_loss = 0.0
     total_policy = 0.0
     total_value = 0.0
@@ -128,20 +128,20 @@ def train_loader_limited(alpha: AlphaZero, loader, max_batches: Optional[int]) -
             else:
                 raise ValueError(f"Unexpected batch structure length={len(batch)}")
 
-        states = states.float().to(alpha.model.device, non_blocking=True)
+        states = states.float().to(trainer.model.device, non_blocking=True)
         value_targets = torch.as_tensor(
-            value_targets, dtype=torch.float32, device=alpha.model.device
+            value_targets, dtype=torch.float32, device=trainer.model.device
         ).view(-1, 1)
         policy_targets = torch.as_tensor(
-            np.asarray(policy_targets), dtype=torch.float32, device=alpha.model.device
+            np.asarray(policy_targets), dtype=torch.float32, device=trainer.model.device
         )
 
         if action_mask is not None:
             action_mask = torch.as_tensor(
-                np.asarray(action_mask), dtype=torch.float32, device=alpha.model.device
+                np.asarray(action_mask), dtype=torch.float32, device=trainer.model.device
             )
 
-        out_policy, out_value = alpha.model(states)
+        out_policy, out_value = trainer.model(states)
 
         if action_mask is not None:
             masked_logits = out_policy.masked_fill(action_mask == 0, -1e9)
@@ -154,9 +154,9 @@ def train_loader_limited(alpha: AlphaZero, loader, max_batches: Optional[int]) -
         value_loss = torch.nn.functional.mse_loss(out_value, value_targets)
         loss = policy_loss + value_loss
 
-        alpha.optimizer.zero_grad(set_to_none=True)
+        trainer.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        alpha.optimizer.step()
+        trainer.optimizer.step()
 
         total_loss += loss.item()
         total_policy += policy_loss.item()
@@ -180,10 +180,10 @@ def evaluate_trial(
     num_workers: int,
     seed: int,
     patience: int,
-) -> Tuple[TrialResult, AlphaZeroChess, optim.Optimizer]:
+) -> Tuple[TrialResult, ChessNet, optim.Optimizer]:
     set_seed(seed)
     env = ChessEnv()
-    model = AlphaZeroChess(
+    model = ChessNet(
         num_resBlocks=int(config["res_blocks"]),
         num_hidden=int(config["num_hidden"]),
     )
@@ -192,7 +192,7 @@ def evaluate_trial(
         lr=float(config["lr"]),
         weight_decay=float(config["weight_decay"]),
     )
-    alpha = AlphaZero(model, optimizer, env, config)
+    trainer = ChessNetTrainer(model, optimizer, env, config)
 
     best_score = math.inf
     best_policy_loss = math.inf
@@ -212,7 +212,7 @@ def evaluate_trial(
         ds.set_epoch(epoch)
 
         latest_train_loss, latest_train_policy, latest_train_value = train_loader_limited(
-            alpha=alpha,
+            trainer=trainer,
             loader=loader,
             max_batches=max_batches_per_epoch,
         )
@@ -284,7 +284,7 @@ def append_trial(results_path: str, result: TrialResult) -> None:
 def save_best_checkpoint(
     output_dir: str,
     result: TrialResult,
-    model: AlphaZeroChess,
+    model: ChessNet,
     optimizer: optim.Optimizer,
 ) -> None:
     output_dir = resolve_path(output_dir)
@@ -296,7 +296,7 @@ def save_best_checkpoint(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Hyperparameter search for AlphaZeroChess.")
+    parser = argparse.ArgumentParser(description="Hyperparameter search for ChessNet.")
     parser.add_argument("--train-dir", default="Stockfish_data")
     parser.add_argument("--val-dir", default="Stockfish_test_data")
     parser.add_argument("--results-path", default="hyperparam_search_results.jsonl")

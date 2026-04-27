@@ -1,5 +1,5 @@
 import torch
-from AlphaZeroChess import AlphaZeroChess
+from ChessNet import ChessNet
 
 @torch.no_grad()
 def export_onnx(model: torch.nn.Module, onnx_path: str):
@@ -43,7 +43,7 @@ def main():
         "epochs": 50,
     }
 
-    model = AlphaZeroChess(
+    model = ChessNet(
         num_resBlocks=config["res_blocks"],
         num_hidden=config["num_hidden"]
     )

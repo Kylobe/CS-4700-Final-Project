@@ -1,6 +1,6 @@
 import torch
 import chess
-from AlphaZeroChess import AlphaZeroChess
+from ChessNet import AlphaZeroChess
 from ChessEnv import ChessEnv
 
 CONFIG = {

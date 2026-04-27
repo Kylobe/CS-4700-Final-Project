@@ -1,6 +1,6 @@
 import chess
 import torch
-from ChessEnv import ChessEnv  # your env
+from ChessEnv import ChessEnv
 import torch
 import numpy as np
 import chess.engine
@@ -28,7 +28,6 @@ DEFAULT_ENGINE_INIT_RETRIES = 3
 DEFAULT_ENGINE_INIT_RETRY_DELAY = 5.0
 
 def get_engine_path() -> str:
-    # folder where stockfish_data_gen.py lives
     root = Path(__file__).resolve().parent
     exe = root/"stockfish"/"stockfish-windows-x86-64-avx2.exe"
     return str(exe)
@@ -111,34 +110,6 @@ def sf_scores_to_probs_plane(info_list, board):
 
     return policy
 
-
-def analyze_value_distribution(samples):
-    vals = np.array([v for (_, _, v, _) in samples])
-    #print("Total samples:", len(vals))
-    #print("Mean:", vals.mean(), "Std:", vals.std())
-
-    # Buckets by |value|
-    bins = [0, 0.1, 0.3, 0.6, 1.1]
-    labels = ["|v| < 0.1", "0.1–0.3", "0.3–0.6", "> 0.6"]
-
-    for (lo, hi), name in zip(zip(bins[:-1], bins[1:]), labels):
-        mask = (np.abs(vals) >= lo) & (np.abs(vals) < hi)
-        #print(f"{name}: {mask.mean()*100:.1f}% of samples")
-
-def bucket_by_eval(samples):
-    buckets = defaultdict(list)
-    for state, policy, val, mask in samples:
-        a = abs(val)
-        if a < 0.1:
-            buckets["small"].append((state, policy, val, mask))
-        elif a < 0.3:
-            buckets["medium"].append((state, policy, val, mask))
-        elif a < 0.6:
-            buckets["large"].append((state, policy, val, mask))
-        else:
-            buckets["huge"].append((state, policy, val, mask))
-    return buckets
-
 def eval_to_value(score: chess.engine.PovScore, turn: bool) -> float:
     """
     Convert Stockfish evaluation to a value in [-1, 1].
@@ -161,28 +132,6 @@ def eval_to_value(score: chess.engine.PovScore, turn: bool) -> float:
     cp = max(min(cp, 1000), -1000)
     # Scale to [-1, 1]
     return math.tanh(cp / 300)
-
-
-
-def data_gen(env: ChessEnv, engine, n = None, length_of_file = 10000, think_ms: int = DEFAULT_THINK_MS):
-    memory = []
-    files_saved = 0
-    while files_saved < n:
-        board = env.reset()
-        while not board.is_game_over():
-            legal_moves = list(board.legal_moves)
-            if len(legal_moves) <= 0:
-                break
-            label, action = label_board(engine, board, think_ms)
-            memory.append(label)
-            board.push(action)
-        #if len(memory) % 10 == 0:
-            #print(f"Memory size is currently: {len(memory)}")
-        if len(memory) >= length_of_file:
-            files_saved += 1
-            torch.save(memory, f"Stockfish_test_data\\labeled{files_saved}.pt")
-            #print(f"Created new file labeled{files_saved}.pt")
-            memory = []
 
 def _get_analysis_game(engine):
     game = getattr(engine, "_analysis_game", None)
@@ -285,63 +234,6 @@ def get_puzzle_csv_path() -> Path:
 def count_csv_rows(csv_path: Path) -> int:
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
         return max(sum(1 for _ in handle) - 1, 0)
-
-UNDERPROMO = {chess.ROOK, chess.BISHOP, chess.KNIGHT}
-UNDERPROMO_SUFFIX = ("r", "b", "n")
-
-def parse_chess_puzzles(engine, env, chunk_size=10_000, out_dir="Stockfish_test_data", think_ms: int = DEFAULT_THINK_MS):
-    #print("Reading Data Frame")
-    df = pd.read_csv("lichess_db_puzzle.csv")
-
-    os.makedirs(out_dir, exist_ok=True)
-
-    memory = []
-    files_saved = 0
-
-    #print("Starting Labeling")
-    for row in df.itertuples(index=False):
-        # adjust names if your columns differ
-        fen = row.FEN
-        moves_str = row.Moves
-
-        move_sequence = moves_str.split()
-
-        # 1) skip puzzles with underpromotion moves
-        if any(uci.endswith(UNDERPROMO_SUFFIX) for uci in move_sequence):
-            continue
-
-        try:
-            board = chess.Board(fen=fen)
-
-            for uci in move_sequence:
-                move = chess.Move.from_uci(uci)
-
-                # extra safety: detect underpromotion via parsed move too
-                if move.promotion in UNDERPROMO:
-                    raise ValueError("Underpromotion detected")
-
-                if move not in board.legal_moves:
-                    raise ValueError(f"Illegal move {uci} for FEN {fen}")
-
-                board.push(move)
-
-                memory.append(label_board(engine, board, think_ms))
-
-                if len(memory) >= chunk_size:
-                    files_saved += 1
-                    out_path = os.path.join(out_dir, f"labeled{files_saved}.pt")
-                    torch.save(memory, out_path)
-                    memory = []
-                    #print(f"Saved New File: {out_path}")
-
-        except Exception:
-            continue
-
-    # save leftover
-    if memory:
-        files_saved += 1
-        out_path = os.path.join(out_dir, f"labeled{files_saved}.pt")
-        torch.save(memory, out_path)
 
 def worker_generate_puzzle_positions(
     worker_id: int,
